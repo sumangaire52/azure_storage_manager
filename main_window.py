@@ -13,7 +13,10 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QDateTime
 from PyQt6.QtGui import QFont
 
+from authenticators import AzureAuthenticator
 from log_handler import LogHandler
+from managers import AzureManager
+from signals import Signals
 
 try:
     from apscheduler.schedulers.qt import QtScheduler
@@ -31,6 +34,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self.azure_manager = AzureManager()
+        self.authenticator = AzureAuthenticator(self)
         self.auth_status_label = QLabel("Not Authenticated")
         self.auth_btn = QPushButton("Authenticate with Azure CLI")
         self.refresh_btn = QPushButton("Refresh Accounts")
@@ -94,6 +99,9 @@ class MainWindow(QMainWindow):
         self.setup_transfers_tab()
         self.setup_scheduler_tab()
         self.setup_logs_tab()
+
+        # Enable signals
+        Signals(self)
 
     def setup_storage_tab(self):
         """Setup storage accounts and containers tab"""
@@ -303,3 +311,7 @@ class MainWindow(QMainWindow):
                 json.dump(settings, f, indent=2)
         except Exception as e:
             logging.error(f"Failed to save settings: {e}")
+
+    def authenticate(self):
+        """Authenticate with Azure CLI"""
+        self.authenticator.authenticate()
