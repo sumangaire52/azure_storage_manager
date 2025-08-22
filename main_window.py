@@ -25,14 +25,15 @@ from PyQt6.QtWidgets import (
     QFrame,
     QMessageBox,
     QListWidgetItem,
+    QTreeWidgetItem,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QDateTime
 from PyQt6.QtGui import QFont
 
 from log_handler import LogHandler
 from managers import AzureManager
-from utils import populate_signals
-from workers import AuthWorker
+from utils import populate_signals, format_size
+from workers import AuthWorker, BlobFetchWorker
 
 
 class MainWindow(QMainWindow):
@@ -44,7 +45,6 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.azure_manager = AzureManager()
-        self.worker = None
         self.auth_status_label = QLabel("Not Authenticated")
         self.auth_btn = QPushButton("Authenticate with Azure CLI")
         self.refresh_btn = QPushButton("Refresh Accounts")
@@ -331,7 +331,7 @@ class MainWindow(QMainWindow):
         self.auth_btn.setText("Authenticating...")
 
         # Create worker
-        self.worker = AuthWorker(self.azure_manager)
+        self.worker = AuthWorker(self.azure_manager)  # noqa
         self.worker.finished.connect(self.on_authentication_complete)
 
         # Run in background
@@ -417,3 +417,59 @@ class MainWindow(QMainWindow):
         self.containers_list.setEnabled(True)
         self.blobs_tree.setEnabled(True)
         logging.info(f"Loaded {len(containers)} containers")
+
+    def on_container_selected(self, item):
+        if not self.accounts_list.currentItem():
+            return
+
+        account_name = self.accounts_list.currentItem().text()
+        container_name = item.text()
+
+        self.blobs_tree.clear()
+        # Show temporary loading node
+        loading_item = QTreeWidgetItem(["Loading..."])
+        self.blobs_tree.addTopLevelItem(loading_item)
+
+        # Worker to fetch blobs
+        self.blob_worker = BlobFetchWorker(
+            self.azure_manager, account_name, container_name, prefix=""
+        )  # noqa
+        self.blob_worker.blobs_fetched.connect(self.on_blobs_fetched)
+        self.blob_worker.start()
+
+    def on_blobs_fetched(self, blobs):
+        """Populate the blobs tree after fetching"""
+        self.blobs_tree.clear()
+
+        for blob in blobs:
+            if blob["is_directory"]:
+                dir_item = QTreeWidgetItem([blob["name"], "", "", ""])
+                dir_item.setChildIndicatorPolicy(
+                    QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
+                )
+                dir_item.setData(
+                    0, Qt.ItemDataRole.UserRole, blob["name"]
+                )  # store prefix for lazy loading
+                self.blobs_tree.addTopLevelItem(dir_item)
+            else:
+                file_item = QTreeWidgetItem(
+                    [
+                        blob["name"],
+                        format_size(blob["size"]),
+                        blob["last_modified"][:19] if blob["last_modified"] else "",
+                        blob["tier"],
+                    ]
+                )
+                file_item.setData(0, Qt.ItemDataRole.UserRole, blob)
+                self.blobs_tree.addTopLevelItem(file_item)
+
+        # self.blobs_tree.itemExpanded.connect(self.on_directory_expanded)
+
+    def populate_blobs_tree(self, blobs: list):
+        self.blobs_tree.clear()
+        for blob in blobs:
+            item = QTreeWidgetItem([blob["name"].split("/")[-1]])
+            item.setData(0, Qt.ItemDataRole.UserRole, blob)
+            if blob.get("is_directory", False):
+                item.addChild(QTreeWidgetItem(["Loading..."]))
+            self.blobs_tree.addTopLevelItem(item)
