@@ -16,8 +16,9 @@ class AzureManager:
         """Authenticate using Azure CLI"""
         try:
             # Check if az login is valid
-            result = subprocess.run(['az', 'account', 'show'],
-                                    capture_output=True, text=True)
+            result = subprocess.run(
+                ["az", "account", "show"], capture_output=True, text=True
+            )
             if result.returncode != 0:
                 return False
 
