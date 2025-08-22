@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -22,14 +23,15 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QDateTimeEdit,
     QFrame,
+    QMessageBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QDateTime
 from PyQt6.QtGui import QFont
 
-from authenticators import AzureAuthenticator
 from log_handler import LogHandler
 from managers import AzureManager
 from signals import Signals
+from workers import AuthWorker
 
 
 class MainWindow(QMainWindow):
@@ -41,7 +43,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.azure_manager = AzureManager()
-        self.authenticator = AzureAuthenticator(self)
+        self.worker = None
         self.auth_status_label = QLabel("Not Authenticated")
         self.auth_btn = QPushButton("Authenticate with Azure CLI")
         self.refresh_btn = QPushButton("Refresh Accounts")
@@ -70,7 +72,7 @@ class MainWindow(QMainWindow):
         self.setup_ui()
 
     def setup_ui(self):
-        """Setup the main user interface"""
+        """Set up the main user interface"""
         self.setWindowTitle("Azure Storage Manager")
         self.setGeometry(100, 100, 1400, 900)
 
@@ -324,4 +326,46 @@ class MainWindow(QMainWindow):
 
     def authenticate(self):
         """Authenticate with Azure CLI"""
-        self.authenticator.authenticate()
+        self.auth_btn.setEnabled(False)
+        self.auth_btn.setText("Authenticating...")
+
+        # Create worker
+        self.worker = AuthWorker(self.azure_manager)
+        self.worker.finished.connect(self.on_authentication_complete)
+
+        # Run in background
+        threading.Thread(target=self.worker.run, daemon=True).start()
+
+    def on_authentication_complete(self, success):
+        """Handle authentication completion"""
+        if success:
+            self.auth_status_label.setText("✓ Authenticated")
+            self.auth_status_label.setStyleSheet("color: green")
+            self.auth_btn.setText("Re-authenticate")
+            self.refresh_btn.setEnabled(True)
+            self.refresh_storage_accounts()
+            logging.info("Successfully authenticated with Azure")
+        else:
+            self.auth_status_label.setText("✗ Authentication Failed")
+            self.auth_status_label.setStyleSheet("color: red")
+            self.auth_btn.setText("Authenticate with Azure CLI")
+            QMessageBox.critical(
+                self,
+                "Authentication Error",
+                "Failed to authenticate. Please run 'az login' first.",
+            )
+
+        self.auth_btn.setEnabled(True)
+
+    def refresh_storage_accounts(self):
+        """Refresh the list of storage accounts"""
+        self.accounts_list.clear()
+        self.containers_list.clear()
+        self.blobs_tree.clear()
+
+        accounts = self.azure_manager.get_storage_accounts()
+
+        for account in accounts:
+            self.accounts_list.addItem(account["name"])
+
+        logging.info(f"Loaded {len(accounts)} storage accounts")

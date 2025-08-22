@@ -1,5 +1,7 @@
 import subprocess
 import logging
+import json
+from typing import List, Dict
 
 from azure.identity import AzureCliCredential
 
@@ -28,3 +30,21 @@ class AzureManager:
         except Exception as e:
             logging.error(f"Authentication failed: {e}")
             return False
+
+    def get_storage_accounts(self) -> List[Dict]:
+        """Get list of all storage accounts"""
+        if not self.is_authenticated:
+            return []
+
+        try:
+            result = subprocess.run(
+                ["az", "storage", "account", "list"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            accounts = json.loads(result.stdout)
+            return accounts
+        except Exception as e:
+            logging.error(f"Failed to get storage accounts: {e}")
+            return []
