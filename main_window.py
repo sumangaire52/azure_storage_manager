@@ -24,13 +24,14 @@ from PyQt6.QtWidgets import (
     QDateTimeEdit,
     QFrame,
     QMessageBox,
+    QListWidgetItem,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QDateTime
 from PyQt6.QtGui import QFont
 
 from log_handler import LogHandler
 from managers import AzureManager
-from signals import Signals
+from utils import populate_signals
 from workers import AuthWorker
 
 
@@ -109,7 +110,7 @@ class MainWindow(QMainWindow):
         self.setup_logs_tab()
 
         # Enable signals
-        Signals(self)
+        populate_signals(self)
 
     def setup_storage_tab(self):
         """Setup storage accounts and containers tab"""
@@ -369,3 +370,50 @@ class MainWindow(QMainWindow):
             self.accounts_list.addItem(account["name"])
 
         logging.info(f"Loaded {len(accounts)} storage accounts")
+
+    def on_account_selected(self, item):
+        """Handle storage account selection and load containers"""
+        account_name = item.text()
+
+        # Clear current containers and blobs
+        self.containers_list.clear()
+        self.blobs_tree.clear()
+
+        # Show a loading placeholder
+        loading_item = QListWidgetItem("Loading...")
+        loading_item.setFlags(Qt.ItemFlag.NoItemFlags)
+        self.containers_list.addItem(loading_item)
+        self.containers_list.setEnabled(False)
+        self.blobs_tree.setEnabled(False)
+
+        # Fetch containers in a background thread
+        threading.Thread(
+            target=self._fetch_containers, args=(account_name,), daemon=True
+        ).start()
+
+    def _fetch_containers(self, account_name):
+        """Worker function to fetch containers in background"""
+        try:
+            containers = self.azure_manager.get_containers(account_name)
+        except Exception as e:
+            containers = []
+            logging.error(f"Failed to load containers for {account_name}: {e}")
+
+        # Emit signal to update UI in main thread
+        self.containers_loaded.emit(containers)
+
+    def populate_containers_list(self, containers):
+        """Populate the containers list in the UI thread"""
+        self.containers_list.clear()
+
+        if not containers:
+            no_item = QListWidgetItem("No containers found")
+            no_item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.containers_list.addItem(no_item)
+        else:
+            for container in containers:
+                self.containers_list.addItem(container)
+
+        self.containers_list.setEnabled(True)
+        self.blobs_tree.setEnabled(True)
+        logging.info(f"Loaded {len(containers)} containers")

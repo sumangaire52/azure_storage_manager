@@ -1,9 +1,10 @@
 import subprocess
 import logging
 import json
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from azure.identity import AzureCliCredential
+from azure.storage.blob import BlobServiceClient
 
 
 class AzureManager:
@@ -48,3 +49,30 @@ class AzureManager:
         except Exception as e:
             logging.error(f"Failed to get storage accounts: {e}")
             return []
+
+    def get_containers(self, account_name: str) -> List[str]:
+        """Get containers for storage account"""
+        client = self.get_blob_service_client(account_name)
+        if not client:
+            return []
+
+        try:
+            containers = client.list_containers()
+            return [c.name for c in containers]
+        except Exception as e:
+            logging.error(f"Failed to list containers: {e}")
+            return []
+
+    def get_blob_service_client(self, account_name: str) -> Optional[BlobServiceClient]:
+        """Get blob service client for account"""
+        if account_name not in self.storage_clients:
+            try:
+                account_url = f"https://{account_name}.blob.core.windows.net"
+                client = BlobServiceClient(
+                    account_url=account_url, credential=self.credential
+                )
+                self.storage_clients[account_name] = client
+            except Exception as e:
+                logging.error(f"Failed to create client for {account_name}: {e}")
+                return None
+        return self.storage_clients[account_name]
