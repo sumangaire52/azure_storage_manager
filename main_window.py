@@ -4,11 +4,24 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QTabWidget, QTreeWidget,QTableWidget,
-    QPushButton, QLabel, QComboBox, QTextEdit,
-    QSplitter, QGroupBox, QSpinBox, QFormLayout,
-    QListWidget, QDateTimeEdit, QFrame
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QTabWidget,
+    QTreeWidget,
+    QTableWidget,
+    QPushButton,
+    QLabel,
+    QComboBox,
+    QTextEdit,
+    QSplitter,
+    QGroupBox,
+    QSpinBox,
+    QFormLayout,
+    QListWidget,
+    QDateTimeEdit,
+    QFrame,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QDateTime
 from PyQt6.QtGui import QFont
@@ -18,17 +31,10 @@ from log_handler import LogHandler
 from managers import AzureManager
 from signals import Signals
 
-try:
-    from apscheduler.schedulers.qt import QtScheduler
-    from apscheduler.triggers.interval import IntervalTrigger
-    from apscheduler.triggers.date import DateTrigger
-    SCHEDULER_AVAILABLE = True
-except ImportError:
-    SCHEDULER_AVAILABLE = False
-    print("APScheduler not available. Install with: pip install apscheduler")
 
 class MainWindow(QMainWindow):
     """Main application window"""
+
     containers_loaded = pyqtSignal(list)
     blobs_loaded = pyqtSignal(list)
 
@@ -172,10 +178,21 @@ class MainWindow(QMainWindow):
 
         # Transfers table
         self.transfers_table.setColumnCount(8)
-        self.transfers_table.setHorizontalHeaderLabels([
-            "Job ID", "Source", "Destination", "Progress", "Speed", "ETA", "Status", "Created"
-        ])
-        self.transfers_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.transfers_table.setHorizontalHeaderLabels(
+            [
+                "Job ID",
+                "Source",
+                "Destination",
+                "Progress",
+                "Speed",
+                "ETA",
+                "Status",
+                "Created",
+            ]
+        )
+        self.transfers_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
 
         layout.addLayout(toolbar)
         layout.addWidget(self.transfers_table)
@@ -187,12 +204,6 @@ class MainWindow(QMainWindow):
         """Setup scheduler tab for batch operations"""
         scheduler_widget = QWidget()
         layout = QVBoxLayout()
-
-        if not SCHEDULER_AVAILABLE:
-            layout.addWidget(QLabel("Scheduler not available. Install APScheduler to enable scheduling features."))
-            scheduler_widget.setLayout(layout)
-            self.tab_widget.addTab(scheduler_widget, "Scheduler")
-            return
 
         # Scheduling controls
         schedule_group = QGroupBox("Schedule New Job")
@@ -218,9 +229,9 @@ class MainWindow(QMainWindow):
         jobs_layout = QVBoxLayout()
 
         self.scheduled_jobs_table.setColumnCount(5)
-        self.scheduled_jobs_table.setHorizontalHeaderLabels([
-            "Job ID", "Type", "Next Run", "Status", "Actions"
-        ])
+        self.scheduled_jobs_table.setHorizontalHeaderLabels(
+            ["Job ID", "Type", "Next Run", "Status", "Actions"]
+        )
 
         jobs_layout.addWidget(self.scheduled_jobs_table)
         jobs_group.setLayout(jobs_layout)
@@ -268,11 +279,8 @@ class MainWindow(QMainWindow):
 
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(log_file),
-                logging.StreamHandler()
-            ]
+            format="%(asctime)s - %(levelname)s - %(message)s",
+            handlers=[logging.FileHandler(log_file), logging.StreamHandler()],
         )
 
         # Custom handler to display logs in UI
@@ -289,8 +297,8 @@ class MainWindow(QMainWindow):
                     settings = json.load(f)
 
                 # Apply settings
-                if 'window_geometry' in settings:
-                    self.restoreGeometry(bytes.fromhex(settings['window_geometry']))
+                if "window_geometry" in settings:
+                    self.restoreGeometry(bytes.fromhex(settings["window_geometry"]))
 
             except Exception as e:
                 logging.warning(f"Failed to load settings: {e}")
@@ -301,13 +309,15 @@ class MainWindow(QMainWindow):
         settings_dir.mkdir(parents=True, exist_ok=True)
 
         settings = {
-            'window_geometry': self.saveGeometry().toHex().data().decode(),
-            'last_used_accounts': [self.accounts_list.item(i).text()
-                                   for i in range(self.accounts_list.count())]
+            "window_geometry": self.saveGeometry().toHex().data().decode(),
+            "last_used_accounts": [
+                self.accounts_list.item(i).text()
+                for i in range(self.accounts_list.count())
+            ],
         }
 
         try:
-            with open(settings_dir / "settings.json", 'w') as f:
+            with open(settings_dir / "settings.json", "w") as f:
                 json.dump(settings, f, indent=2)
         except Exception as e:
             logging.error(f"Failed to save settings: {e}")

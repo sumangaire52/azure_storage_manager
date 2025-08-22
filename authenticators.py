@@ -24,7 +24,6 @@ class AzureAuthenticator:
         # Run in background
         threading.Thread(target=self.worker.run, daemon=True).start()
 
-
     def on_authentication_complete(self, success):
         """Handle authentication completion"""
         if success:
@@ -38,6 +37,9 @@ class AzureAuthenticator:
             self.window.auth_status_label.setText("✗ Authentication Failed")
             self.window.auth_status_label.setStyleSheet("color: red")
             self.window.auth_btn.setText("Authenticate with Azure CLI")
-            QMessageBox.critical(self, "Authentication Error Failed to authenticate. Please run 'az login' first.")
+            QMessageBox.critical(
+                self,
+                "Authentication Error Failed to authenticate. Please run 'az login' first.",
+            )
 
         self.window.auth_btn.setEnabled(True)

@@ -14,7 +14,8 @@ def main():
     # Set application icon (if available)
     try:
         app.setWindowIcon(QIcon("icon.png"))
-    except:
+    except Exception:
+        print("Couldn't load icon")
         pass
 
     # Apply modern style

@@ -1,6 +1,7 @@
 import logging
 from PyQt6.QtCore import QObject, pyqtSignal
 
+
 class LogHandler(logging.Handler, QObject):
     """Custom log handler to emit signals for UI updates"""
 
