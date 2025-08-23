@@ -716,17 +716,38 @@ class MainWindow(QMainWindow):
         account_name = self.accounts_list.currentItem().text()
         container_name = self.containers_list.currentItem().text()
 
-        # Get blob data from selected items
+        # Get blob data from selected items - be more careful about what we select
         items_to_download = []
         for item in selected_items:
             blob_data = item.data(0, Qt.ItemDataRole.UserRole)
             if blob_data and blob_data.get("name"):
+                # Debug: Log what we're selecting
+                item_type = (
+                    "directory" if blob_data.get("is_directory", False) else "file"
+                )
+                logging.info(
+                    f"Selected for download: {blob_data['name']} (type: {item_type})"
+                )
                 items_to_download.append(blob_data)
 
         if not items_to_download:
             QMessageBox.warning(
                 self, "Warning", "No valid items selected for download."
             )
+            return
+
+        # Show selection summary
+        dirs = sum(1 for item in items_to_download if item.get("is_directory", False))
+        files = len(items_to_download) - dirs
+
+        result = QMessageBox.question(
+            self,
+            "Confirm Download",
+            f"Download {files} files and {dirs} folders?\n\nThis will download all contents recursively.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+
+        if result != QMessageBox.StandardButton.Yes:
             return
 
         # Choose download directory

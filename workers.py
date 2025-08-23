@@ -72,6 +72,13 @@ class DownloadWorker(QThread):
                     self.download_completed.emit(False, "Download cancelled")
                     return
 
+                # Skip if this is somehow a directory (shouldn't happen but safety check)
+                if file_blob.get("is_directory", False):
+                    logging.warning(
+                        f"Skipping directory in file list: {file_blob['name']}"
+                    )
+                    continue
+
                 success = self._download_single_file(file_blob)
 
                 if success:
@@ -90,19 +97,39 @@ class DownloadWorker(QThread):
             logging.error(f"Download error: {e}")
             self.download_completed.emit(False, f"Download failed: {str(e)}")
 
-    def _get_all_files_in_directory(self, directory_prefix):
-        """Recursively get all files in a directory"""
+    def _get_all_files_in_directory(self, directory_prefix, all_files=None):
+        """Recursively get all files in a directory and all its subdirectories"""
+        if all_files is None:
+            all_files = []
         try:
-            all_blobs = self.azure_manager.get_blobs_in_container(
-                self.account_name, self.container_name, directory_prefix
+            logging.info(
+                f"Getting all files recursively for directory: {directory_prefix}"
             )
 
-            # Filter only files (not directories)
-            files = [blob for blob in all_blobs if not blob.get("is_directory", False)]
-            return files
+            blobs = self.azure_manager.get_blobs_in_container(
+                account_name=self.account_name,
+                container_name=self.container_name,
+                prefix=directory_prefix,
+            )
+
+            for blob in blobs:
+                if blob.get("is_directory", False):
+                    self._get_all_files_in_directory(
+                        directory_prefix=blob["name"], all_files=all_files
+                    )
+                else:
+                    all_files.append(blob)
+                    logging.debug(f"Added file for download: {blob['name']}")
+
+            logging.info(
+                f"Found {len(all_files)} files recursively in {directory_prefix}"
+            )
+            return all_files
 
         except Exception as e:
-            logging.error(f"Failed to list directory {directory_prefix}: {e}")
+            logging.error(
+                f"Failed to recursively list directory {directory_prefix}: {e}"
+            )
             return []
 
     def _download_single_file(self, blob_info):
