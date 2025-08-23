@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QTreeWidgetItem,
     QFileDialog,
+    QProgressDialog,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QDateTime, pyqtSlot
 from PyQt6.QtGui import QFont
@@ -34,7 +35,7 @@ from PyQt6.QtGui import QFont
 from log_handler import LogHandler
 from managers import AzureManager
 from utils import populate_signals, format_size
-from workers import AuthWorker
+from workers import AuthWorker, DownloadWorker
 
 
 class MainWindow(QMainWindow):
@@ -692,3 +693,168 @@ class MainWindow(QMainWindow):
 
         # Sort children: directories first, then files, both alphabetically
         parent_item.sortChildren(0, Qt.SortOrder.AscendingOrder)
+
+    # Download logic for files and folder
+    def download_selected_items(self):
+        """Download selected items (files or folders) from the blob tree"""
+        selected_items = self.blobs_tree.selectedItems()
+
+        if not selected_items:
+            QMessageBox.warning(self, "Warning", "Please select items to download.")
+            return
+
+        # Get current account and container
+        if (
+            not self.accounts_list.currentItem()
+            or not self.containers_list.currentItem()
+        ):
+            QMessageBox.warning(
+                self, "Warning", "Please select an account and container."
+            )
+            return
+
+        account_name = self.accounts_list.currentItem().text()
+        container_name = self.containers_list.currentItem().text()
+
+        # Get blob data from selected items
+        items_to_download = []
+        for item in selected_items:
+            blob_data = item.data(0, Qt.ItemDataRole.UserRole)
+            if blob_data and blob_data.get("name"):
+                items_to_download.append(blob_data)
+
+        if not items_to_download:
+            QMessageBox.warning(
+                self, "Warning", "No valid items selected for download."
+            )
+            return
+
+        # Choose download directory
+        download_path = QFileDialog.getExistingDirectory(
+            self, "Select Download Location", str(Path.home() / "Downloads")
+        )
+
+        if not download_path:
+            return  # User cancelled
+
+        # Start download
+        self._start_download(
+            account_name, container_name, items_to_download, download_path
+        )
+
+    def _start_download(
+        self, account_name, container_name, items_to_download, local_path
+    ):
+        """Start the download process with progress dialog"""
+
+        # Create progress dialog
+        self.download_progress = QProgressDialog(
+            "Preparing download...", "Cancel", 0, 100, self
+        )
+        self.download_progress.setWindowTitle("Downloading Files")
+        self.download_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.download_progress.setMinimumDuration(0)
+        self.download_progress.setValue(0)
+
+        # Create download worker
+        self.download_worker = DownloadWorker(
+            self.azure_manager,
+            account_name,
+            container_name,
+            items_to_download,
+            local_path,
+        )
+
+        # Connect signals
+        self.download_worker.progress_updated.connect(self.download_progress.setValue)
+        self.download_worker.status_updated.connect(self.download_progress.setLabelText)
+        self.download_worker.file_completed.connect(self._on_file_downloaded)
+        self.download_worker.download_completed.connect(self._on_download_completed)
+
+        # Connect cancel button
+        self.download_progress.canceled.connect(self.download_worker.cancel)
+
+        # Start download
+        self.download_worker.start()
+
+        logging.info(
+            f"Started download of {len(items_to_download)} items to {local_path}"
+        )
+
+    def _on_file_downloaded(self, file_path):
+        """Handle individual file download completion"""
+        logging.info(f"Downloaded: {file_path}")
+
+    def _on_download_completed(self, success, message):
+        """Handle download completion"""
+        self.download_progress.close()
+
+        if success:
+            QMessageBox.information(self, "Download Complete", message)
+            logging.info(f"Download completed: {message}")
+        else:
+            QMessageBox.critical(self, "Download Failed", message)
+            logging.error(f"Download failed: {message}")
+
+        # Clean up
+        if hasattr(self, "download_worker"):
+            self.download_worker.deleteLater()
+
+    def download_single_blob(self, blob_name, local_file_path):
+        """Download a single blob to a specific local file path"""
+        if (
+            not self.accounts_list.currentItem()
+            or not self.containers_list.currentItem()
+        ):
+            return False
+
+        account_name = self.accounts_list.currentItem().text()
+        container_name = self.containers_list.currentItem().text()
+
+        try:
+            # Get blob service client
+            client = self.azure_manager.get_blob_service_client(account_name)
+            if not client:
+                return False
+
+            # Create directories if they don't exist
+            Path(local_file_path).parent.mkdir(parents=True, exist_ok=True)
+
+            # Download the blob
+            blob_client = client.get_blob_client(
+                container=container_name, blob=blob_name
+            )
+
+            with open(local_file_path, "wb") as download_file:
+                download_stream = blob_client.download_blob()
+                download_file.write(download_stream.readall())
+
+            logging.info(f"Successfully downloaded {blob_name} to {local_file_path}")
+            return True
+
+        except Exception as e:
+            logging.error(f"Failed to download {blob_name}: {e}")
+            return False
+
+    def get_selected_items_info(self):
+        """Get information about selected items for download preview"""
+        selected_items = self.blobs_tree.selectedItems()
+
+        if not selected_items:
+            return {"files": 0, "directories": 0, "total_size": 0}
+
+        info = {"files": 0, "directories": 0, "total_size": 0}
+
+        for item in selected_items:
+            blob_data = item.data(0, Qt.ItemDataRole.UserRole)
+            if not blob_data:
+                continue
+
+            if blob_data.get("is_directory", False):
+                info["directories"] += 1
+                # Note: Would need to calculate directory size by listing all files
+            else:
+                info["files"] += 1
+                info["total_size"] += blob_data.get("size", 0)
+
+        return info

@@ -1,4 +1,7 @@
-from PyQt6.QtCore import QObject, pyqtSignal
+import logging
+from pathlib import Path
+
+from PyQt6.QtCore import QObject, pyqtSignal, QThread
 
 
 class AuthWorker(QObject):
@@ -11,3 +14,127 @@ class AuthWorker(QObject):
     def run(self):
         success = self.azure_manager.authenticate()
         self.finished.emit(success)
+
+
+class DownloadWorker(QThread):
+    """Worker thread for downloading blobs"""
+
+    progress_updated = pyqtSignal(int)  # Progress percentage
+    status_updated = pyqtSignal(str)  # Status message
+    file_completed = pyqtSignal(str)  # File path completed
+    download_completed = pyqtSignal(bool, str)  # Success, message
+
+    def __init__(
+        self, azure_manager, account_name, container_name, items_to_download, local_path
+    ):
+        super().__init__()
+        self.azure_manager = azure_manager
+        self.account_name = account_name
+        self.container_name = container_name
+        self.items_to_download = items_to_download
+        self.local_path = Path(local_path)
+        self.cancelled = False
+
+    def cancel(self):
+        """Cancel the download operation"""
+        self.cancelled = True
+
+    def run(self):
+        """Main download logic"""
+        try:
+            total_files = 0
+            completed_files = 0
+
+            # First, count total files to download
+            self.status_updated.emit("Calculating files to download...")
+
+            files_to_download = []
+            for item in self.items_to_download:
+                if item.get("is_directory", False):
+                    # Get all files in directory recursively
+                    dir_files = self._get_all_files_in_directory(item["name"])
+                    files_to_download.extend(dir_files)
+                else:
+                    # Single file
+                    files_to_download.append(item)
+
+            total_files = len(files_to_download)
+
+            if total_files == 0:
+                self.download_completed.emit(True, "No files to download")
+                return
+
+            self.status_updated.emit(f"Downloading {total_files} files...")
+
+            # Download each file
+            for file_blob in files_to_download:
+                if self.cancelled:
+                    self.download_completed.emit(False, "Download cancelled")
+                    return
+
+                success = self._download_single_file(file_blob)
+
+                if success:
+                    completed_files += 1
+                    progress = int((completed_files / total_files) * 100)
+                    self.progress_updated.emit(progress)
+                    self.file_completed.emit(file_blob["name"])
+                else:
+                    logging.error(f"Failed to download: {file_blob['name']}")
+
+            # Complete
+            message = f"Successfully downloaded {completed_files}/{total_files} files"
+            self.download_completed.emit(completed_files > 0, message)
+
+        except Exception as e:
+            logging.error(f"Download error: {e}")
+            self.download_completed.emit(False, f"Download failed: {str(e)}")
+
+    def _get_all_files_in_directory(self, directory_prefix):
+        """Recursively get all files in a directory"""
+        try:
+            all_blobs = self.azure_manager.get_blobs_in_container(
+                self.account_name, self.container_name, directory_prefix
+            )
+
+            # Filter only files (not directories)
+            files = [blob for blob in all_blobs if not blob.get("is_directory", False)]
+            return files
+
+        except Exception as e:
+            logging.error(f"Failed to list directory {directory_prefix}: {e}")
+            return []
+
+    def _download_single_file(self, blob_info):
+        """Download a single blob file"""
+        try:
+            blob_name = blob_info["name"]
+
+            # Create local file path
+            relative_path = blob_name
+            local_file_path = self.local_path / relative_path
+
+            # Create directories if they don't exist
+            local_file_path.parent.mkdir(parents=True, exist_ok=True)
+
+            self.status_updated.emit(f"Downloading: {blob_name}")
+
+            # Get blob service client
+            client = self.azure_manager.get_blob_service_client(self.account_name)
+            if not client:
+                return False
+
+            # Download the blob
+            blob_client = client.get_blob_client(
+                container=self.container_name, blob=blob_name
+            )
+
+            with open(local_file_path, "wb") as download_file:
+                download_stream = blob_client.download_blob()
+                download_file.write(download_stream.readall())
+
+            return True
+
+        except Exception as e:
+            logging.error(f"Failed to download {blob_info['name']}: {e}")
+            return False

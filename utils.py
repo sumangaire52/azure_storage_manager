@@ -13,6 +13,9 @@ def populate_signals(window):
     window.blobs_tree.itemExpanded.connect(window.on_directory_expanded)
     window.directory_contents_loaded.connect(window.on_directory_contents_loaded)
 
+    # Files and folder download/transfer
+    window.download_btn.clicked.connect(window.download_selected_items)
+
     # Logging
     window.clear_logs_btn.clicked.connect(window.clear_logs)
     window.export_logs_btn.clicked.connect(window.export_logs)
