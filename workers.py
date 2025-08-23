@@ -1,7 +1,7 @@
 import logging
 import time
 from pathlib import Path
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 
 from utils import format_bytes, format_time
@@ -272,7 +272,7 @@ class TransferWorker(QThread):
         )
 
     def run(self):
-        """Main transfer logic with parallel size calculation"""
+        """Main transfer logic with parallel transfers and size calculation"""
         try:
             self.start_time = time.time()
             self.completed_files = 0
@@ -285,11 +285,9 @@ class TransferWorker(QThread):
             files_to_transfer = []
             for item in self.items_to_transfer:
                 if item.get("is_directory", False):
-                    # Get all files in directory recursively
                     dir_files = self._get_all_files_in_directory(item["name"])
                     files_to_transfer.extend(dir_files)
                 else:
-                    # Single file
                     files_to_transfer.append(item)
 
             self.total_files = len(files_to_transfer)
@@ -298,7 +296,7 @@ class TransferWorker(QThread):
                 self.transfer_completed.emit(True, "No files to transfer")
                 return
 
-            # Start size calculation in parallel (don't wait)
+            # Start size calculation in parallel
             self.status_updated.emit(
                 f"Starting transfer of {self.total_files} files..."
             )
@@ -311,67 +309,86 @@ class TransferWorker(QThread):
                 files_to_transfer,
             )
 
-            # Connect size calculation signals
             self.size_calculator.size_batch_calculated.connect(
                 self._on_size_batch_calculated
             )
             self.size_calculator.calculation_completed.connect(
                 self._on_size_calculation_completed
             )
-
-            # Start size calculation in parallel (non-blocking)
             self.size_calculator.start()
 
-            # Start the actual transfer immediately
-            # Transfer each file
-            for i, file_blob in enumerate(files_to_transfer):
-                if self.cancelled:
-                    self.transfer_completed.emit(False, "Transfer cancelled")
-                    return
+            # Start concurrent transfers
+            max_workers = 10  # Start with 10 concurrent transfers
 
-                # Skip directories
-                if file_blob.get("is_directory", False):
-                    continue
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all transfer jobs
+                future_to_file = {}
 
-                # Get file size from cache if available, otherwise get it now
-                file_size = file_blob.get("size")
-                if file_size is None:
-                    # Size not calculated yet, get it now for this file
-                    file_size = self._get_single_file_size(file_blob)
-                    file_blob["size"] = file_size
+                for file_blob in files_to_transfer:
+                    if self.cancelled:
+                        break
 
-                success = self._transfer_single_file(file_blob)
+                    if file_blob.get("is_directory", False):
+                        continue
 
-                if success:
-                    self.completed_files += 1
-                    self.bytes_transferred += file_size
+                    future = executor.submit(self._transfer_single_file, file_blob)
+                    future_to_file[future] = file_blob
 
-                    # Update progress - use mixed approach based on what we know
-                    if self.total_bytes > 0:
-                        # We have some total size info, use byte-based progress
-                        progress = min(
-                            int((self.bytes_transferred / self.total_bytes) * 100), 99
+                # Process completed transfers as they finish
+                for future in as_completed(future_to_file):
+                    if self.cancelled:
+                        break
+
+                    file_blob = future_to_file[future]
+
+                    try:
+                        success = future.result()
+
+                        # Get file size from cache if available, otherwise get it now
+                        file_size = file_blob.get("size")
+                        if file_size is None:
+                            file_size = self._get_single_file_size(file_blob)
+                            file_blob["size"] = file_size
+
+                        if success:
+                            self.completed_files += 1
+                            self.bytes_transferred += file_size
+
+                            # Update progress
+                            if self.total_bytes > 0:
+                                progress = min(
+                                    int(
+                                        (self.bytes_transferred / self.total_bytes)
+                                        * 100
+                                    ),
+                                    99,
+                                )
+                            else:
+                                progress = int(
+                                    (self.completed_files / self.total_files) * 100
+                                )
+
+                            self.progress_updated.emit(progress)
+                            self.file_completed.emit(file_blob["name"])
+
+                            # Update speed and ETA
+                            (
+                                speed,
+                                eta,
+                                bytes_done,
+                                total_bytes,
+                                size_calc_complete,
+                            ) = self._calculate_speed_and_eta()
+                            self.speed_eta_updated.emit(
+                                speed, eta, bytes_done, total_bytes, size_calc_complete
+                            )
+                        else:
+                            logging.error(f"Failed to transfer: {file_blob['name']}")
+
+                    except Exception as e:
+                        logging.error(
+                            f"Transfer future failed for {file_blob['name']}: {e}"
                         )
-                    else:
-                        # No total size yet, use file-based progress
-                        progress = int((self.completed_files / self.total_files) * 100)
-
-                    self.progress_updated.emit(progress)
-                    self.file_completed.emit(file_blob["name"])
-
-                    # Update speed and ETA
-                    (
-                        speed,
-                        eta,
-                        bytes_done,
-                        total_bytes,
-                        size_calc_complete,
-                    ) = self._calculate_speed_and_eta()
-                    self.speed_eta_updated.emit(
-                        speed, eta, bytes_done, total_bytes, size_calc_complete
-                    )
-                else:
-                    logging.error(f"Failed to transfer: {file_blob['name']}")
 
             # Wait for size calculation to complete (if still running)
             if self.size_calculator and self.size_calculator.isRunning():
@@ -452,8 +469,6 @@ class TransferWorker(QThread):
             else:
                 dest_blob_name = source_blob_name.split("/")[-1]
 
-            self.status_updated.emit(f"Transferring: {source_blob_name}")
-
             # Get destination client
             dest_client = self.azure_manager.get_blob_service_client(self.dest_account)
             if not dest_client:
@@ -487,6 +502,7 @@ class TransferWorker(QThread):
             # Start copy operation
             dest_blob_client.start_copy_from_url(source_sas_url)
 
+            # Wait for copy to complete with optimized polling
             while True:
                 if self.cancelled:
                     return False
@@ -501,7 +517,7 @@ class TransferWorker(QThread):
                     logging.error(f"Copy failed for {source_blob_name}")
                     return False
                 elif copy_status in ["pending", "copying"]:
-                    time.sleep(0.1)
+                    time.sleep(0.1)  # Fast polling
                 else:
                     logging.error(f"Unknown copy status: {copy_status}")
                     return False
