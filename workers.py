@@ -289,26 +289,15 @@ class TransferWorker(QThread):
             if self.options.get("preserve_structure", True):
                 dest_blob_name = source_blob_name
             else:
-                # Just use the filename without directory structure
                 dest_blob_name = source_blob_name.split("/")[-1]
 
             self.status_updated.emit(f"Transferring: {source_blob_name}")
 
-            # Get source and destination clients
-            source_client = self.azure_manager.get_blob_service_client(
-                self.source_account
-            )
+            # Get destination client
             dest_client = self.azure_manager.get_blob_service_client(self.dest_account)
-
-            if not source_client or not dest_client:
+            if not dest_client:
                 return False
 
-            # Get source blob client
-            source_blob_client = source_client.get_blob_client(
-                container=self.source_container, blob=source_blob_name
-            )
-
-            # Get destination blob client
             dest_blob_client = dest_client.get_blob_client(
                 container=self.dest_container, blob=dest_blob_name
             )
@@ -317,32 +306,54 @@ class TransferWorker(QThread):
             if not self.options.get("overwrite", False):
                 try:
                     dest_blob_client.get_blob_properties()
-                    # Blob exists and overwrite is False
                     logging.warning(f"Skipping existing blob: {dest_blob_name}")
                     return True
-                except Exception as e:
-                    logging.error(f"Failed to transfer blob: {e}")
+                except Exception:
                     pass
 
-            # Get the source blob URL for copy operation
-            source_url = source_blob_client.url
+            # Generate SAS URL for source blob
+            source_sas_url = self.azure_manager.generate_blob_sas_url(
+                account_name=self.source_account,
+                container_name=self.source_container,
+                blob_name=source_blob_name,
+                expiry_hours=1,
+            )
+
+            if not source_sas_url:
+                logging.error(f"Failed to generate SAS URL for {source_blob_name}")
+                return False
 
             # Start copy operation
-            dest_blob_client.start_copy_from_url(source_url)
+            dest_blob_client.start_copy_from_url(source_sas_url)
 
             # Wait for copy to complete
-            copy_status = dest_blob_client.get_blob_properties().copy.status
+            import time
 
-            if copy_status == "success":
-                logging.info(
-                    f"Successfully transferred: {source_blob_name} -> {dest_blob_name}"
-                )
-                return True
-            else:
-                logging.error(
-                    f"Copy failed for {source_blob_name}: status = {copy_status}"
-                )
-                return False
+            max_wait_time = 300  # 5 minutes max
+            wait_time = 0
+
+            while wait_time < max_wait_time:
+                if self.cancelled:
+                    return False
+
+                properties = dest_blob_client.get_blob_properties()
+                copy_status = properties.copy.status
+
+                if copy_status == "success":
+                    logging.info(f"Successfully transferred: {source_blob_name}")
+                    return True
+                elif copy_status == "failed":
+                    logging.error(f"Copy failed for {source_blob_name}")
+                    return False
+                elif copy_status in ["pending", "copying"]:
+                    time.sleep(2)
+                    wait_time += 2
+                else:
+                    logging.error(f"Unknown copy status: {copy_status}")
+                    return False
+
+            logging.error(f"Copy operation timed out for {source_blob_name}")
+            return False
 
         except Exception as e:
             logging.error(f"Failed to transfer {blob_info['name']}: {e}")
