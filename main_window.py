@@ -34,7 +34,7 @@ from PyQt6.QtGui import QFont
 from log_handler import LogHandler
 from managers import AzureManager
 from utils import populate_signals, format_size
-from workers import AuthWorker, BlobFetchWorker
+from workers import AuthWorker
 
 
 class MainWindow(QMainWindow):
@@ -42,6 +42,7 @@ class MainWindow(QMainWindow):
 
     containers_loaded = pyqtSignal(list)
     blobs_loaded = pyqtSignal(list)
+    directory_contents_loaded = pyqtSignal(object, list)
 
     def __init__(self):
         super().__init__()
@@ -472,46 +473,222 @@ class MainWindow(QMainWindow):
         loading_item = QTreeWidgetItem(["Loading..."])
         self.blobs_tree.addTopLevelItem(loading_item)
 
-        # Worker to fetch blobs
-        self.blob_worker = BlobFetchWorker(
-            self.azure_manager, account_name, container_name, prefix=""
-        )  # noqa
-        self.blob_worker.blobs_fetched.connect(self.on_blobs_fetched)
-        self.blob_worker.start()
+        # Fetch blobs on background
+        threading.Thread(
+            target=self._fetch_blobs, args=(account_name, container_name), daemon=True
+        ).start()
 
-    def on_blobs_fetched(self, blobs):
-        """Populate the blobs tree after fetching"""
-        self.blobs_tree.clear()
+    def _fetch_blobs(self, account_name, container_name):
+        """Worker function to fetch blobs in background"""
+        try:
+            blobs = self.azure_manager.get_blobs_in_container(
+                account_name, container_name
+            )
+        except Exception as e:
+            blobs = []
+            logging.error(
+                f"Failed to load blobs for {account_name}/{container_name}: {e}"
+            )
 
-        for blob in blobs:
-            if blob["is_directory"]:
-                dir_item = QTreeWidgetItem([blob["name"], "", "", ""])
-                dir_item.setChildIndicatorPolicy(
-                    QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
-                )
-                dir_item.setData(
-                    0, Qt.ItemDataRole.UserRole, blob["name"]
-                )  # store prefix for lazy loading
-                self.blobs_tree.addTopLevelItem(dir_item)
-            else:
-                file_item = QTreeWidgetItem(
-                    [
-                        blob["name"],
-                        format_size(blob["size"]),
-                        blob["last_modified"][:19] if blob["last_modified"] else "",
-                        blob["tier"],
-                    ]
-                )
-                file_item.setData(0, Qt.ItemDataRole.UserRole, blob)
-                self.blobs_tree.addTopLevelItem(file_item)
-
-        # self.blobs_tree.itemExpanded.connect(self.on_directory_expanded)
+        # Emit signal to update UI in main thread
+        self.blobs_loaded.emit(blobs)
 
     def populate_blobs_tree(self, blobs: list):
+        """Populate the blobs tree with the provided blob data"""
         self.blobs_tree.clear()
+
+        if not blobs:
+            # Show empty state
+            empty_item = QTreeWidgetItem(["No blobs found", "", "", ""])
+            empty_item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.blobs_tree.addTopLevelItem(empty_item)
+            return
+
         for blob in blobs:
-            item = QTreeWidgetItem([blob["name"].split("/")[-1]])
+            # Extract blob information
+            name = blob.get("name", "")
+            size = blob.get("size", 0)
+            last_modified = blob.get("last_modified", "")
+            tier = blob.get("tier", "")
+            is_directory = blob.get("is_directory", False)
+
+            # Format display values
+            if is_directory:
+                # For directories
+                display_name = (
+                    name.rstrip("/").split("/")[-1] + "/"
+                    if name
+                    else "Unknown Directory"
+                )
+                size_display = ""
+                modified_display = ""
+                tier_display = ""
+            else:
+                # For files
+                display_name = name.split("/")[-1] if name else "Unknown File"
+                size_display = format_size(size) if size > 0 else ""
+                modified_display = last_modified[:19] if last_modified else ""
+                tier_display = tier if tier else ""
+
+            # Create tree widget item with all four columns
+            item = QTreeWidgetItem(
+                [display_name, size_display, modified_display, tier_display]
+            )
+
+            # Store the full blob data for later use
             item.setData(0, Qt.ItemDataRole.UserRole, blob)
-            if blob.get("is_directory", False):
-                item.addChild(QTreeWidgetItem(["Loading..."]))
+
+            # If it's a directory, add a placeholder child for expansion
+            if is_directory:
+                placeholder = QTreeWidgetItem(["Loading..."])
+                placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+                item.addChild(placeholder)
+                item.setChildIndicatorPolicy(
+                    QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
+                )
+
+            # Add item to tree
             self.blobs_tree.addTopLevelItem(item)
+
+    def on_directory_expanded(self, item):
+        """Handle directory expansion - lazy load subdirectories and files"""
+        # Get the stored blob data from the item
+        blob_data = item.data(0, Qt.ItemDataRole.UserRole)
+
+        if not blob_data or not blob_data.get("is_directory", False):
+            return
+
+        # Check if we've already loaded this directory
+        if item.childCount() == 1:
+            first_child = item.child(0)
+            if first_child.text(0) != "Loading...":
+                # Already loaded, don't reload
+                return
+
+        # Get current account and container
+        if (
+            not self.accounts_list.currentItem()
+            or not self.containers_list.currentItem()
+        ):
+            return
+
+        account_name = self.accounts_list.currentItem().text()
+        container_name = self.containers_list.currentItem().text()
+
+        # Get the directory prefix (path)
+        prefix = blob_data["name"]
+
+        # Remove the placeholder "Loading..." item
+        item.takeChildren()
+
+        # Add a loading indicator
+        loading_item = QTreeWidgetItem(["Loading..."])
+        loading_item.setFlags(Qt.ItemFlag.NoItemFlags)
+        item.addChild(loading_item)
+
+        # Fetch subdirectories and files in background thread
+        threading.Thread(
+            target=self._fetch_directory_contents,
+            args=(item, account_name, container_name, prefix),
+            daemon=True,
+        ).start()
+
+    def _fetch_directory_contents(
+        self, parent_item, account_name, container_name, prefix
+    ):
+        """Worker function to fetch directory contents in background"""
+        try:
+            # Fetch blobs with the directory prefix
+            blobs = self.azure_manager.get_blobs_in_container(
+                account_name, container_name, prefix
+            )
+
+            # Filter to get only direct children (not nested subdirectories)
+            direct_children = []
+
+            for blob in blobs:
+                blob_name = blob["name"]
+
+                # Skip the parent directory itself
+                if blob_name == prefix:
+                    continue
+
+                # Remove the parent prefix to get the relative path
+                if blob_name.startswith(prefix):
+                    relative_path = blob_name[len(prefix) :]
+
+                    # For directories: check if it's a direct child (only one more level)
+                    if blob.get("is_directory", False):
+                        # Count slashes in relative path - should be 0 for direct child directories
+                        if relative_path.count("/") <= 1:
+                            direct_children.append(blob)
+                    else:
+                        # For files: check if it's directly in this directory (no subdirectories)
+                        if "/" not in relative_path:
+                            direct_children.append(blob)
+
+            # Emit signal to update UI in main thread
+            self.directory_contents_loaded.emit(parent_item, direct_children)
+
+        except Exception as e:
+            logging.error(f"Failed to load directory contents for {prefix}: {e}")
+            # Emit empty list on error
+            self.directory_contents_loaded.emit(parent_item, [])
+
+    def on_directory_contents_loaded(self, parent_item, blobs):
+        """Handle directory contents loaded - update the tree in main thread"""
+        # Remove the loading indicator
+        parent_item.takeChildren()
+
+        if not blobs:
+            # No items in this directory
+            empty_item = QTreeWidgetItem(["No items"])
+            empty_item.setFlags(Qt.ItemFlag.NoItemFlags)
+            parent_item.addChild(empty_item)
+            return
+
+        # Add each blob as a child item
+        for blob in blobs:
+            # Extract blob information
+            name = blob.get("name", "")
+            size = blob.get("size", 0)
+            last_modified = blob.get("last_modified", "")
+            tier = blob.get("tier", "")
+            is_directory = blob.get("is_directory", False)
+
+            # Format display values
+            if is_directory:
+                # For subdirectories - show just the folder name
+                display_name = name.rstrip("/").split("/")[-1] + "/"
+                size_display = ""
+                modified_display = ""
+                tier_display = ""
+            else:
+                # For files - show just the filename
+                display_name = name.split("/")[-1]
+                size_display = format_size(size) if size > 0 else ""
+                modified_display = last_modified[:19] if last_modified else ""
+                tier_display = tier if tier else ""
+
+            # Create child item
+            child_item = QTreeWidgetItem(
+                [display_name, size_display, modified_display, tier_display]
+            )
+
+            # Store the full blob data
+            child_item.setData(0, Qt.ItemDataRole.UserRole, blob)
+
+            # If it's a directory, add placeholder for further expansion
+            if is_directory:
+                placeholder = QTreeWidgetItem(["Loading..."])
+                placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+                child_item.addChild(placeholder)
+                child_item.setChildIndicatorPolicy(
+                    QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
+                )
+
+            # Add to parent
+            parent_item.addChild(child_item)
+
+        # Sort children: directories first, then files, both alphabetically
+        parent_item.sortChildren(0, Qt.SortOrder.AscendingOrder)

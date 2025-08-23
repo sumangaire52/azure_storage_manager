@@ -2,11 +2,18 @@ SIZE_NAMES = ["B", "KB", "MB", "GB", "TB"]
 
 
 def populate_signals(window):
+    # Authentication
     window.auth_btn.clicked.connect(window.authenticate)
     window.accounts_list.itemClicked.connect(window.on_account_selected)
+
+    # Containers and blobs
     window.containers_loaded.connect(window.populate_containers_list)
     window.containers_list.itemClicked.connect(window.on_container_selected)
     window.blobs_loaded.connect(window.populate_blobs_tree)
+    window.blobs_tree.itemExpanded.connect(window.on_directory_expanded)
+    window.directory_contents_loaded.connect(window.on_directory_contents_loaded)
+
+    # Logging
     window.clear_logs_btn.clicked.connect(window.clear_logs)
     window.export_logs_btn.clicked.connect(window.export_logs)
 
