@@ -30,13 +30,14 @@ from PyQt6.QtWidgets import (
     QProgressDialog,
     QDialog,
     QCheckBox,
+    QProgressBar,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QDateTime, pyqtSlot
 from PyQt6.QtGui import QFont
 
 from log_handler import LogHandler
 from managers import AzureManager
-from utils import populate_signals, format_size
+from utils import populate_signals, format_size, format_bytes
 from workers import AuthWorker, DownloadWorker, TransferWorker
 
 
@@ -927,16 +928,10 @@ class MainWindow(QMainWindow):
     def _start_transfer(
         self, source_account, source_container, config, items_to_transfer
     ):
-        """Start the transfer process with progress dialog"""
+        """Start the transfer process with enhanced progress dialog"""
 
-        # Create progress dialog
-        self.transfer_progress = QProgressDialog(
-            "Preparing transfer...", "Cancel", 0, 100, self
-        )
-        self.transfer_progress.setWindowTitle("Transferring Files")
-        self.transfer_progress.setWindowModality(Qt.WindowModality.WindowModal)
-        self.transfer_progress.setMinimumDuration(0)
-        self.transfer_progress.setValue(0)
+        # Create enhanced progress dialog
+        self.transfer_progress = TransferProgressDialog(self)
 
         # Create transfer worker
         self.transfer_worker = TransferWorker(
@@ -950,39 +945,56 @@ class MainWindow(QMainWindow):
         )
 
         # Connect signals
-        self.transfer_worker.progress_updated.connect(self.transfer_progress.setValue)
-        self.transfer_worker.status_updated.connect(self.transfer_progress.setLabelText)
+        self.transfer_worker.progress_updated.connect(
+            self.transfer_progress.update_progress
+        )
+        self.transfer_worker.status_updated.connect(
+            self.transfer_progress.update_status
+        )
         self.transfer_worker.file_completed.connect(self._on_transfer_file_completed)
         self.transfer_worker.transfer_completed.connect(self._on_transfer_completed)
+        self.transfer_worker.speed_eta_updated.connect(
+            self.transfer_progress.update_speed_eta
+        )
 
         # Connect cancel button
-        self.transfer_progress.canceled.connect(self.transfer_worker.cancel)
+        self.transfer_progress.cancel_button.clicked.connect(self._on_transfer_cancel)
 
-        # Start transfer
+        # Show dialog and start transfer
+        self.transfer_progress.show()
         self.transfer_worker.start()
 
         logging.info(
             f"Started transfer of {len(items_to_transfer)} items to {config['dest_account']}/{config['dest_container']}"
         )
 
-    def _on_transfer_file_completed(self, file_path):
-        """Handle individual file transfer completion"""
-        logging.info(f"Transferred: {file_path}")
+    def _on_transfer_cancel(self):
+        """Handle transfer cancellation"""
+        if hasattr(self, "transfer_worker") and self.transfer_worker.isRunning():
+            self.transfer_worker.cancel()
+            self.transfer_progress.update_status("Cancelling transfer...")
+
+    def _on_transfer_file_completed(self, file_name):
+        """Handle individual file completion"""
+        logging.info(f"Completed transfer: {file_name}")
 
     def _on_transfer_completed(self, success, message):
         """Handle transfer completion"""
-        self.transfer_progress.close()
+        if hasattr(self, "transfer_progress"):
+            self.transfer_progress.set_completed(success, message)
+
+        # Clean up worker
+        if hasattr(self, "transfer_worker"):
+            self.transfer_worker.quit()
+            self.transfer_worker.wait()
 
         if success:
-            QMessageBox.information(self, "Transfer Complete", message)
-            logging.info(f"Transfer completed: {message}")
+            logging.info(f"Transfer completed successfully: {message}")
+            # Optionally refresh the current view
+            if hasattr(self, "refresh_current_container"):
+                self.refresh_current_container()
         else:
-            QMessageBox.critical(self, "Transfer Failed", message)
             logging.error(f"Transfer failed: {message}")
-
-        # Clean up
-        if hasattr(self, "transfer_worker"):
-            self.transfer_worker.deleteLater()
 
     def get_selected_items_info(self):
         """Get information about selected items for download preview"""
@@ -1133,3 +1145,110 @@ class TransferDialog(QDialog):
             "overwrite": self.overwrite_checkbox.isChecked(),
             "preserve_structure": self.preserve_structure_checkbox.isChecked(),
         }
+
+
+class TransferProgressDialog(QDialog):
+    """Enhanced progress dialog with speed and ETA information"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Transferring Files")
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setFixedSize(450, 200)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint)
+
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Setup the progress dialog UI"""
+        layout = QVBoxLayout()
+
+        # Status label
+        self.status_label = QLabel("Preparing transfer...")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.status_label)
+
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        layout.addWidget(self.progress_bar)
+
+        # Statistics frame
+        stats_frame = QFrame()
+        stats_frame.setFrameStyle(QFrame.Shape.Box)
+        stats_layout = QVBoxLayout()
+
+        # Speed and ETA row
+        speed_eta_layout = QHBoxLayout()
+        self.speed_label = QLabel("Speed: --")
+        self.eta_label = QLabel("ETA: --")
+        speed_eta_layout.addWidget(self.speed_label)
+        speed_eta_layout.addStretch()
+        speed_eta_layout.addWidget(self.eta_label)
+
+        # Transfer progress row
+        transfer_layout = QHBoxLayout()
+        self.transferred_label = QLabel("Transferred: 0 B")
+        self.total_size_label = QLabel("Total: 0 B")
+        transfer_layout.addWidget(self.transferred_label)
+        transfer_layout.addStretch()
+        transfer_layout.addWidget(self.total_size_label)
+
+        stats_layout.addLayout(speed_eta_layout)
+        stats_layout.addLayout(transfer_layout)
+        stats_frame.setLayout(stats_layout)
+        layout.addWidget(stats_frame)
+
+        # Cancel button
+        button_layout = QHBoxLayout()
+        self.cancel_button = QPushButton("Cancel")
+        button_layout.addStretch()
+        button_layout.addWidget(self.cancel_button)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def update_progress(self, value):
+        """Update progress bar value"""
+        self.progress_bar.setValue(value)
+
+    def update_status(self, text):
+        """Update status label text"""
+        self.status_label.setText(text)
+
+    def update_speed_eta(
+        self, speed, eta, bytes_transferred, total_bytes, size_calculation_complete
+    ):
+        """Update speed, ETA and transfer statistics"""
+        self.speed_label.setText(f"Speed: {speed}")
+        self.eta_label.setText(f"ETA: {eta}")
+        self.transferred_label.setText(
+            f"Transferred: {format_bytes(bytes_transferred)}"
+        )
+
+        # Show total size based on whether calculation is complete
+        if size_calculation_complete:
+            self.total_size_label.setText(f"Total: {format_bytes(total_bytes)}")
+        else:
+            if total_bytes > 0:
+                self.total_size_label.setText(
+                    f"Total: {format_bytes(total_bytes)} (calculating...)"
+                )
+            else:
+                self.total_size_label.setText("Total: Calculating...")
+
+    def set_completed(self, success, message):
+        """Set the dialog to completed state"""
+        if success:
+            self.status_label.setText(f"✅ {message}")
+        else:
+            self.status_label.setText(f"❌ {message}")
+
+        # Change button text and disconnect old handler
+        self.cancel_button.setText("Close")
+        # Disconnect all previous connections to avoid conflicts
+        self.cancel_button.clicked.disconnect()
+        # Connect to accept (close dialog)
+        self.cancel_button.clicked.connect(self.accept)

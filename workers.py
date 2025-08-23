@@ -1,7 +1,10 @@
 import logging
+import time
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
+
+from utils import format_bytes, format_time
 
 
 class AuthWorker(QObject):
@@ -174,6 +177,9 @@ class TransferWorker(QThread):
     status_updated = pyqtSignal(str)  # Status message
     file_completed = pyqtSignal(str)  # File path completed
     transfer_completed = pyqtSignal(bool, str)  # Success, message
+    speed_eta_updated = pyqtSignal(
+        str, str, int, int, bool
+    )  # Speed, ETA, bytes_transferred, total_bytes, size_calculation_complete
 
     def __init__(
         self,
@@ -195,16 +201,76 @@ class TransferWorker(QThread):
         self.options = options
         self.cancelled = False
 
+        # Speed and ETA tracking
+        self.start_time = None
+        self.bytes_transferred = 0
+        self.total_bytes = 0
+        self.completed_files = 0
+        self.total_files = 0
+        self.total_size_calculated = False
+
     def cancel(self):
         """Cancel the transfer operation"""
         self.cancelled = True
 
-    def run(self):
-        """Main transfer logic"""
-        try:
-            completed_files = 0
+    def _calculate_speed_and_eta(self):
+        """Calculate transfer speed and ETA with gradual size discovery"""
+        if not self.start_time or self.bytes_transferred == 0:
+            return (
+                "0 B/s",
+                "Calculating...",
+                0,
+                self.total_bytes,
+                self.total_size_calculated,
+            )
 
-            # First, get all files to transfer
+        elapsed_time = time.time() - self.start_time
+        if elapsed_time == 0:
+            return (
+                "0 B/s",
+                "Calculating...",
+                self.bytes_transferred,
+                self.total_bytes,
+                self.total_size_calculated,
+            )
+
+        # Calculate speed
+        speed_bps = self.bytes_transferred / elapsed_time
+        speed_str = f"{format_bytes(speed_bps)}/s"
+
+        # Calculate ETA based on file completion rate (more reliable than bytes during gradual discovery)
+        if self.completed_files > 0 and self.total_files > 0:
+            files_per_second = self.completed_files / elapsed_time
+            remaining_files = self.total_files - self.completed_files
+
+            if files_per_second > 0:
+                eta_seconds = remaining_files / files_per_second
+                eta_str = format_time(eta_seconds)
+            else:
+                eta_str = "Calculating..."
+        else:
+            eta_str = "Calculating..."
+
+        return (
+            speed_str,
+            eta_str,
+            self.bytes_transferred,
+            self.total_bytes,
+            self.total_size_calculated,
+        )
+
+    def run(self):
+        """Main transfer logic with NO upfront size calculation"""
+        try:
+            self.start_time = time.time()
+            self.completed_files = 0
+            self.bytes_transferred = 0
+            self.total_bytes = 0  # Will be calculated as we go
+            self.total_size_calculated = (
+                False  # Track when we're done calculating total
+            )
+
+            # First, get all files to transfer (NO size calculation)
             self.status_updated.emit("Calculating files to transfer...")
 
             files_to_transfer = []
@@ -217,16 +283,18 @@ class TransferWorker(QThread):
                     # Single file
                     files_to_transfer.append(item)
 
-            total_files = len(files_to_transfer)
+            self.total_files = len(files_to_transfer)
 
-            if total_files == 0:
+            if self.total_files == 0:
                 self.transfer_completed.emit(True, "No files to transfer")
                 return
 
-            self.status_updated.emit(f"Transferring {total_files} files...")
+            self.status_updated.emit(
+                f"Starting transfer of {self.total_files} files..."
+            )
 
-            # Transfer each file
-            for file_blob in files_to_transfer:
+            # Transfer each file - get size ONLY when we're about to transfer it
+            for i, file_blob in enumerate(files_to_transfer):
                 if self.cancelled:
                     self.transfer_completed.emit(False, "Transfer cancelled")
                     return
@@ -235,19 +303,58 @@ class TransferWorker(QThread):
                 if file_blob.get("is_directory", False):
                     continue
 
+                # Get file size ONLY for the current file being transferred
+                file_size = 0
+                try:
+                    source_client = self.azure_manager.get_blob_service_client(
+                        self.source_account
+                    )
+                    if source_client:
+                        blob_client = source_client.get_blob_client(
+                            container=self.source_container, blob=file_blob["name"]
+                        )
+                        properties = blob_client.get_blob_properties()
+                        file_size = properties.size
+                        self.total_bytes += file_size  # Add to running total
+                except Exception as e:
+                    logging.warning(f"Failed to get size for {file_blob['name']}: {e}")
+                    file_size = 0
+
                 success = self._transfer_single_file(file_blob)
 
                 if success:
-                    completed_files += 1
-                    progress = int((completed_files / total_files) * 100)
+                    self.completed_files += 1
+                    self.bytes_transferred += file_size
+
+                    # Update progress based on file count
+                    progress = int((self.completed_files / self.total_files) * 100)
                     self.progress_updated.emit(progress)
                     self.file_completed.emit(file_blob["name"])
+
+                    # Check if we've calculated all sizes
+                    if self.completed_files == self.total_files:
+                        self.total_size_calculated = True
+
+                    # Update speed and ETA
+                    (
+                        speed,
+                        eta,
+                        bytes_done,
+                        total_bytes,
+                        size_calc_done,
+                    ) = self._calculate_speed_and_eta()
+                    self.speed_eta_updated.emit(
+                        speed, eta, bytes_done, total_bytes, size_calc_done
+                    )
                 else:
                     logging.error(f"Failed to transfer: {file_blob['name']}")
 
+            # Mark total size calculation as complete
+            self.total_size_calculated = True
+
             # Complete
-            message = f"Successfully transferred {completed_files}/{total_files} files"
-            self.transfer_completed.emit(completed_files > 0, message)
+            message = f"Successfully transferred {self.completed_files}/{self.total_files} files"
+            self.transfer_completed.emit(self.completed_files > 0, message)
 
         except Exception as e:
             logging.error(f"Transfer error: {e}")
@@ -309,7 +416,7 @@ class TransferWorker(QThread):
                     logging.warning(f"Skipping existing blob: {dest_blob_name}")
                     return True
                 except Exception:
-                    pass
+                    pass  # Blob doesn't exist, continue
 
             # Generate SAS URL for source blob
             source_sas_url = self.azure_manager.generate_blob_sas_url(
@@ -327,8 +434,6 @@ class TransferWorker(QThread):
             dest_blob_client.start_copy_from_url(source_sas_url)
 
             # Wait for copy to complete
-            import time
-
             max_wait_time = 300  # 5 minutes max
             wait_time = 0
 
@@ -358,3 +463,89 @@ class TransferWorker(QThread):
         except Exception as e:
             logging.error(f"Failed to transfer {blob_info['name']}: {e}")
             return False
+
+
+class SizeCalculatorWorker(QThread):
+    """Worker thread for calculating file sizes in batches"""
+
+    size_batch_calculated = pyqtSignal(int)  # Total bytes calculated so far
+    calculation_completed = pyqtSignal(int)  # Final total bytes
+
+    def __init__(
+        self, azure_manager, source_account, source_container, files_to_calculate
+    ):
+        super().__init__()
+        self.azure_manager = azure_manager
+        self.source_account = source_account
+        self.source_container = source_container
+        self.files_to_calculate = files_to_calculate
+        self.cancelled = False
+        self.batch_size = 10  # Calculate 10 files at a time
+        self.batch_delay = 3.0  # 3 seconds delay between batches
+
+    def cancel(self):
+        """Cancel the size calculation"""
+        self.cancelled = True
+
+    def run(self):
+        """Calculate file sizes in batches"""
+        try:
+            total_calculated = 0
+            source_client = self.azure_manager.get_blob_service_client(
+                self.source_account
+            )
+
+            if not source_client:
+                logging.error("Failed to get source client for size calculation")
+                self.calculation_completed.emit(0)
+                return
+
+            # Process files in batches
+            for i in range(0, len(self.files_to_calculate), self.batch_size):
+                if self.cancelled:
+                    break
+
+                batch = self.files_to_calculate[i : i + self.batch_size]
+                batch_total = 0
+
+                # Calculate sizes for this batch
+                for file_blob in batch:
+                    if self.cancelled:
+                        break
+
+                    if file_blob.get("is_directory", False):
+                        continue
+
+                    try:
+                        blob_client = source_client.get_blob_client(
+                            container=self.source_container, blob=file_blob["name"]
+                        )
+                        properties = blob_client.get_blob_properties()
+                        file_size = properties.size
+                        batch_total += file_size
+
+                        # Small delay between individual requests within batch
+                        time.sleep(0.1)  # 100ms between individual requests
+
+                    except Exception as e:
+                        logging.warning(
+                            f"Failed to get size for {file_blob['name']}: {e}"
+                        )
+                        continue
+
+                # Update total and emit progress
+                total_calculated += batch_total
+                self.size_batch_calculated.emit(total_calculated)
+
+                # Delay between batches to avoid throttling
+                if i + self.batch_size < len(
+                    self.files_to_calculate
+                ):  # Don't delay after last batch
+                    time.sleep(self.batch_delay)
+
+            # Emit final total
+            self.calculation_completed.emit(total_calculated)
+
+        except Exception as e:
+            logging.error(f"Size calculation error: {e}")
+            self.calculation_completed.emit(0)
