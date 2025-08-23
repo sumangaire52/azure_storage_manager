@@ -35,3 +35,17 @@ def format_size(size_bytes):
         i += 1
 
     return f"{size:.1f} {SIZE_NAMES[i]}"
+
+
+def format_time(seconds):
+    """Format seconds to human-readable time"""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    elif seconds < 3600:
+        minutes = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{minutes}m {secs}s"
+    else:
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        return f"{hours}h {minutes}m"
