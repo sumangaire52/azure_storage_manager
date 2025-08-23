@@ -487,11 +487,7 @@ class TransferWorker(QThread):
             # Start copy operation
             dest_blob_client.start_copy_from_url(source_sas_url)
 
-            # Wait for copy to complete
-            max_wait_time = 300  # 5 minutes max
-            wait_time = 0
-
-            while wait_time < max_wait_time:
+            while True:
                 if self.cancelled:
                     return False
 
@@ -505,14 +501,10 @@ class TransferWorker(QThread):
                     logging.error(f"Copy failed for {source_blob_name}")
                     return False
                 elif copy_status in ["pending", "copying"]:
-                    time.sleep(2)
-                    wait_time += 2
+                    time.sleep(0.1)
                 else:
                     logging.error(f"Unknown copy status: {copy_status}")
                     return False
-
-            logging.error(f"Copy operation timed out for {source_blob_name}")
-            return False
 
         except Exception as e:
             logging.error(f"Failed to transfer {blob_info['name']}: {e}")
@@ -534,8 +526,8 @@ class SizeCalculatorWorker(QThread):
         self.source_container = source_container
         self.files_to_calculate = files_to_calculate
         self.cancelled = False
-        self.batch_size = 10  # Calculate 10 files at a time
-        self.batch_delay = 3.0  # 3 seconds delay between batches
+        self.batch_size = 100  # Calculate 10 files at a time
+        self.batch_delay = 1  # 1 seconds delay between batches
 
     def cancel(self):
         """Cancel the size calculation"""
