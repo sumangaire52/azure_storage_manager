@@ -7,6 +7,8 @@ def populate_signals(window):
     window.containers_loaded.connect(window.populate_containers_list)
     window.containers_list.itemClicked.connect(window.on_container_selected)
     window.blobs_loaded.connect(window.populate_blobs_tree)
+    window.clear_logs_btn.clicked.connect(window.clear_logs)
+    window.export_logs_btn.clicked.connect(window.export_logs)
 
 
 def format_size(size_bytes):

@@ -26,8 +26,9 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QListWidgetItem,
     QTreeWidgetItem,
+    QFileDialog,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QDateTime
+from PyQt6.QtCore import Qt, pyqtSignal, QDateTime, pyqtSlot
 from PyQt6.QtGui import QFont
 
 from log_handler import LogHandler
@@ -45,6 +46,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.azure_manager = AzureManager()
+        self.log_handler = LogHandler()
         self.auth_status_label = QLabel("Not Authenticated")
         self.auth_btn = QPushButton("Authenticate with Azure CLI")
         self.refresh_btn = QPushButton("Refresh Accounts")
@@ -70,6 +72,7 @@ class MainWindow(QMainWindow):
         self.scheduled_jobs_table = QTableWidget()
         self.log_display = QTextEdit()
         self.log_handler = LogHandler()
+        self.setup_logging()
         self.setup_ui()
 
     def setup_ui(self):
@@ -245,6 +248,7 @@ class MainWindow(QMainWindow):
         scheduler_widget.setLayout(layout)
         self.tab_widget.addTab(scheduler_widget, "Scheduler")
 
+    # Logging
     def setup_logs_tab(self):
         """Setup logs and monitoring tab"""
         logs_widget = QWidget()
@@ -289,6 +293,44 @@ class MainWindow(QMainWindow):
         # Custom handler to display logs in UI
         self.log_handler.log_message.connect(self.append_log_message)
         logging.getLogger().addHandler(self.log_handler)
+
+    @pyqtSlot(str)
+    def append_log_message(self, message):
+        """Append log message to the display"""
+        self.log_display.append(message)
+
+        # Auto-scroll to bottom
+        cursor = self.log_display.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self.log_display.setTextCursor(cursor)
+
+        # Limit log display to last 1000 lines
+        text = self.log_display.toPlainText()
+        lines = text.split("\n")
+
+        if len(lines) > 1000:
+            self.log_display.setPlainText("\n".join(lines[-1000:]))
+
+    def clear_logs(self):
+        """Clear the log display"""
+        self.log_display.clear()
+
+    def export_logs(self):
+        """Export logs to file"""
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Logs",
+            f"azure_storage_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            "Text Files (*.txt);;All Files (*)",
+        )
+
+        if filename:
+            try:
+                with open(filename, "w") as f:
+                    f.write(self.log_display.toPlainText())
+                QMessageBox.information(self, "Success", f"Logs exported to {filename}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to export logs: {e}")
 
     def load_settings(self):
         """Load application settings"""
