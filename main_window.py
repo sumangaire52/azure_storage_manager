@@ -1081,9 +1081,13 @@ class TransferDialog(QDialog):
         self.overwrite_checkbox = QCheckBox("Overwrite existing files")
         self.preserve_structure_checkbox = QCheckBox("Preserve directory structure")
         self.preserve_structure_checkbox.setChecked(True)
+        self.concurrency = QSpinBox()
+        self.concurrency.setRange(1, 64)
+        self.concurrency.setValue(8)
 
         options_layout.addRow(self.overwrite_checkbox)
         options_layout.addRow(self.preserve_structure_checkbox)
+        options_layout.addRow("Concurrent File Transfer:", self.concurrency)
 
         options_group.setLayout(options_layout)
 
@@ -1144,6 +1148,7 @@ class TransferDialog(QDialog):
             "dest_container": self.dest_container_combo.currentText(),
             "overwrite": self.overwrite_checkbox.isChecked(),
             "preserve_structure": self.preserve_structure_checkbox.isChecked(),
+            "concurrency": self.concurrency.value(),
         }
 
 
