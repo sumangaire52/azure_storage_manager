@@ -28,6 +28,8 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItem,
     QFileDialog,
     QProgressDialog,
+    QDialog,
+    QCheckBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QDateTime, pyqtSlot
 from PyQt6.QtGui import QFont
@@ -35,7 +37,7 @@ from PyQt6.QtGui import QFont
 from log_handler import LogHandler
 from managers import AzureManager
 from utils import populate_signals, format_size
-from workers import AuthWorker, DownloadWorker
+from workers import AuthWorker, DownloadWorker, TransferWorker
 
 
 class MainWindow(QMainWindow):
@@ -857,6 +859,131 @@ class MainWindow(QMainWindow):
             logging.error(f"Failed to download {blob_name}: {e}")
             return False
 
+    # File transfer from one account to another
+    def create_new_transfer(self):
+        """Create a new transfer job between storage accounts"""
+        selected_items = self.blobs_tree.selectedItems()
+
+        if not selected_items:
+            QMessageBox.warning(self, "Warning", "Please select items to transfer.")
+            return
+
+        # Get current account and container
+        if (
+            not self.accounts_list.currentItem()
+            or not self.containers_list.currentItem()
+        ):
+            QMessageBox.warning(
+                self, "Warning", "Please select source account and container."
+            )
+            return
+
+        # Get blob data from selected items
+        items_to_transfer = []
+        for item in selected_items:
+            blob_data = item.data(0, Qt.ItemDataRole.UserRole)
+            if blob_data and blob_data.get("name"):
+                items_to_transfer.append(blob_data)
+
+        if not items_to_transfer:
+            QMessageBox.warning(
+                self, "Warning", "No valid items selected for transfer."
+            )
+            return
+
+        # Show transfer dialog
+        dialog = TransferDialog(self, self.azure_manager, items_to_transfer)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            config = dialog.get_transfer_config()
+
+            if not config["dest_account"] or not config["dest_container"]:
+                QMessageBox.warning(
+                    self, "Warning", "Please select destination account and container."
+                )
+                return
+
+            # Confirm transfer
+            source_account = self.accounts_list.currentItem().text()
+            source_container = self.containers_list.currentItem().text()
+
+            result = QMessageBox.question(
+                self,
+                "Confirm Transfer",
+                f"Transfer {len(items_to_transfer)} items from:\n"
+                f"{source_account}/{source_container}\n\n"
+                f"To:\n"
+                f"{config['dest_account']}/{config['dest_container']}\n\n"
+                f"Overwrite existing: {'Yes' if config['overwrite'] else 'No'}\n"
+                f"Preserve structure: {'Yes' if config['preserve_structure'] else 'No'}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+
+            if result == QMessageBox.StandardButton.Yes:
+                self._start_transfer(
+                    source_account, source_container, config, items_to_transfer
+                )
+
+    def _start_transfer(
+        self, source_account, source_container, config, items_to_transfer
+    ):
+        """Start the transfer process with progress dialog"""
+
+        # Create progress dialog
+        self.transfer_progress = QProgressDialog(
+            "Preparing transfer...", "Cancel", 0, 100, self
+        )
+        self.transfer_progress.setWindowTitle("Transferring Files")
+        self.transfer_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.transfer_progress.setMinimumDuration(0)
+        self.transfer_progress.setValue(0)
+
+        # Create transfer worker
+        self.transfer_worker = TransferWorker(
+            self.azure_manager,
+            source_account,
+            source_container,
+            config["dest_account"],
+            config["dest_container"],
+            items_to_transfer,
+            config,
+        )
+
+        # Connect signals
+        self.transfer_worker.progress_updated.connect(self.transfer_progress.setValue)
+        self.transfer_worker.status_updated.connect(self.transfer_progress.setLabelText)
+        self.transfer_worker.file_completed.connect(self._on_transfer_file_completed)
+        self.transfer_worker.transfer_completed.connect(self._on_transfer_completed)
+
+        # Connect cancel button
+        self.transfer_progress.canceled.connect(self.transfer_worker.cancel)
+
+        # Start transfer
+        self.transfer_worker.start()
+
+        logging.info(
+            f"Started transfer of {len(items_to_transfer)} items to {config['dest_account']}/{config['dest_container']}"
+        )
+
+    def _on_transfer_file_completed(self, file_path):
+        """Handle individual file transfer completion"""
+        logging.info(f"Transferred: {file_path}")
+
+    def _on_transfer_completed(self, success, message):
+        """Handle transfer completion"""
+        self.transfer_progress.close()
+
+        if success:
+            QMessageBox.information(self, "Transfer Complete", message)
+            logging.info(f"Transfer completed: {message}")
+        else:
+            QMessageBox.critical(self, "Transfer Failed", message)
+            logging.error(f"Transfer failed: {message}")
+
+        # Clean up
+        if hasattr(self, "transfer_worker"):
+            self.transfer_worker.deleteLater()
+
     def get_selected_items_info(self):
         """Get information about selected items for download preview"""
         selected_items = self.blobs_tree.selectedItems()
@@ -879,3 +1006,130 @@ class MainWindow(QMainWindow):
                 info["total_size"] += blob_data.get("size", 0)
 
         return info
+
+
+class TransferDialog(QDialog):
+    """Dialog for selecting transfer destination"""
+
+    def __init__(self, parent, azure_manager, source_items):
+        super().__init__(parent)
+        self.azure_manager = azure_manager
+        self.source_items = source_items
+        self.dest_account_combo = QComboBox()
+        self.dest_container_combo = QComboBox()
+        self.source_account = parent.accounts_list.currentItem().text()
+        self.source_container = parent.containers_list.currentItem().text()
+
+        self.setup_ui()
+        self.load_destinations()
+
+    def setup_ui(self):
+        """Setup the transfer dialog UI"""
+        self.setWindowTitle("Transfer Files")
+        self.setModal(True)
+        self.resize(500, 400)
+
+        layout = QVBoxLayout()
+
+        # Source information
+        source_group = QGroupBox("Source")
+        source_layout = QFormLayout()
+
+        source_layout.addRow("Account:", QLabel(self.source_account))
+        source_layout.addRow("Container:", QLabel(self.source_container))
+
+        # Show selected items
+        items_text = QTextEdit()
+        items_text.setMaximumHeight(100)
+        items_text.setReadOnly(True)
+
+        items_list = []
+        for item in self.source_items:
+            item_type = "📁" if item.get("is_directory", False) else "📄"
+            items_list.append(f"{item_type} {item['name']}")
+
+        items_text.setPlainText("\n".join(items_list))
+        source_layout.addRow("Selected Items:", items_text)
+
+        source_group.setLayout(source_layout)
+
+        # Destination selection
+        dest_group = QGroupBox("Destination")
+        dest_layout = QFormLayout()
+
+        dest_layout.addRow("Account:", self.dest_account_combo)
+        dest_layout.addRow("Container:", self.dest_container_combo)
+
+        dest_group.setLayout(dest_layout)
+
+        # Options
+        options_group = QGroupBox("Transfer Options")
+        options_layout = QFormLayout()
+
+        self.overwrite_checkbox = QCheckBox("Overwrite existing files")
+        self.preserve_structure_checkbox = QCheckBox("Preserve directory structure")
+        self.preserve_structure_checkbox.setChecked(True)
+
+        options_layout.addRow(self.overwrite_checkbox)
+        options_layout.addRow(self.preserve_structure_checkbox)
+
+        options_group.setLayout(options_layout)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+
+        self.transfer_btn = QPushButton("Start Transfer")
+        self.cancel_btn = QPushButton("Cancel")
+
+        button_layout.addStretch()
+        button_layout.addWidget(self.transfer_btn)
+        button_layout.addWidget(self.cancel_btn)
+
+        # Add to main layout
+        layout.addWidget(source_group)
+        layout.addWidget(dest_group)
+        layout.addWidget(options_group)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+        # Connect signals
+        self.dest_account_combo.currentTextChanged.connect(self.load_containers)
+        self.transfer_btn.clicked.connect(self.accept)
+        self.cancel_btn.clicked.connect(self.reject)
+
+    def load_destinations(self):
+        """Load available storage accounts"""
+        accounts = self.azure_manager.get_storage_accounts()
+
+        self.dest_account_combo.clear()
+        for account in accounts:
+            self.dest_account_combo.addItem(account["name"])
+
+        # Load containers for first account
+        if accounts:
+            self.load_containers()
+
+    def load_containers(self):
+        """Load containers for selected account"""
+        account_name = self.dest_account_combo.currentText()
+        if not account_name:
+            return
+
+        self.dest_container_combo.clear()
+
+        try:
+            containers = self.azure_manager.get_containers(account_name)
+            for container in containers:
+                self.dest_container_combo.addItem(container)
+        except Exception as e:
+            logging.error(f"Failed to load containers for {account_name}: {e}")
+
+    def get_transfer_config(self):
+        """Get the transfer configuration"""
+        return {
+            "dest_account": self.dest_account_combo.currentText(),
+            "dest_container": self.dest_container_combo.currentText(),
+            "overwrite": self.overwrite_checkbox.isChecked(),
+            "preserve_structure": self.preserve_structure_checkbox.isChecked(),
+        }
