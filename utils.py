@@ -37,15 +37,6 @@ def format_size(size_bytes):
     return f"{size:.1f} {SIZE_NAMES[i]}"
 
 
-def format_bytes(bytes_value):
-    """Format bytes to human-readable format"""
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if bytes_value < 1024.0:
-            return f"{bytes_value:.1f} {unit}"
-        bytes_value /= 1024.0
-    return f"{bytes_value:.1f} PB"
-
-
 def format_time(seconds):
     """Format seconds to human-readable time"""
     if seconds < 60:

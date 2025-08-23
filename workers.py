@@ -2,9 +2,9 @@ import logging
 import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from PyQt6.QtCore import QObject, pyqtSignal, QThread
+from PyQt6.QtCore import QObject, pyqtSignal, QThread, QMutexLocker, QMutex
 
-from utils import format_bytes, format_time
+from utils import format_size, format_time
 
 
 class AuthWorker(QObject):
@@ -243,7 +243,7 @@ class TransferWorker(QThread):
 
         # Calculate speed
         speed_bps = self.bytes_transferred / elapsed_time
-        speed_str = f"{format_bytes(speed_bps)}/s"
+        speed_str = f"{format_size(speed_bps)}/s"
 
         # Calculate ETA based on what we know
         if self.total_bytes > 0 and speed_bps > 0:
@@ -395,7 +395,7 @@ class TransferWorker(QThread):
                 self.size_calculator.wait()
 
             # Complete
-            message = f"Successfully transferred {self.completed_files}/{self.total_files} files ({format_bytes(self.bytes_transferred)})"
+            message = f"Successfully transferred {self.completed_files}/{self.total_files} files ({format_size(self.bytes_transferred)})"
             self.transfer_completed.emit(self.completed_files > 0, message)
 
         except Exception as e:
@@ -411,7 +411,7 @@ class TransferWorker(QThread):
         """Handle size calculation completion"""
         self.total_bytes = total_size
         self.size_calculation_complete = True
-        logging.info(f"Total size calculation completed: {format_bytes(total_size)}")
+        logging.info(f"Total size calculation completed: {format_size(total_size)}")
 
     def _get_single_file_size(self, file_blob):
         """Get size for a single file if not already cached"""
@@ -530,11 +530,17 @@ class TransferWorker(QThread):
 class SizeCalculatorWorker(QThread):
     """Worker thread for calculating file sizes in batches"""
 
-    size_batch_calculated = pyqtSignal(int)  # Total bytes calculated so far
-    calculation_completed = pyqtSignal(int)  # Final total bytes
+    size_batch_calculated = pyqtSignal(int)
+    calculation_completed = pyqtSignal(int)
+    progress_updated = pyqtSignal(int, int)
 
     def __init__(
-        self, azure_manager, source_account, source_container, files_to_calculate
+        self,
+        azure_manager,
+        source_account,
+        source_container,
+        files_to_calculate,
+        max_workers=12,
     ):
         super().__init__()
         self.azure_manager = azure_manager
@@ -542,17 +548,71 @@ class SizeCalculatorWorker(QThread):
         self.source_container = source_container
         self.files_to_calculate = files_to_calculate
         self.cancelled = False
-        self.batch_size = 100  # Calculate 10 files at a time
-        self.batch_delay = 1  # 1 seconds delay between batches
+        self.max_workers = max_workers
+
+        self.total_calculated = 0
+        self.completed_files = 0
+        self.mutex = QMutex()
 
     def cancel(self):
         """Cancel the size calculation"""
         self.cancelled = True
 
+    def _worker_function(self, files_chunk, source_client, worker_id):
+        """Worker function that processes a chunk of files"""
+        chunk_total = 0
+
+        for file_blob in files_chunk:
+            if self.cancelled:
+                break
+
+            if file_blob.get("is_directory", False):
+                file_blob["size"] = 0
+                size = 0
+            else:
+                try:
+                    blob_client = source_client.get_blob_client(
+                        container=self.source_container, blob=file_blob["name"]
+                    )
+                    properties = blob_client.get_blob_properties()
+                    size = properties.size
+                    file_blob["size"] = size
+
+                    # Stagger requests to avoid overwhelming API
+                    time.sleep(0.02 * (worker_id + 1))  # Different delays per worker
+
+                except Exception as e:
+                    logging.warning(
+                        f"Worker {worker_id} failed to get size for {file_blob['name']}: {e}"
+                    )
+                    file_blob["size"] = 0
+                    size = 0
+
+            chunk_total += size
+
+            # Thread-safe update
+            with QMutexLocker(self.mutex):
+                self.total_calculated += size
+                self.completed_files += 1
+                current_total = self.total_calculated
+                current_completed = self.completed_files
+
+            # Emit progress (every 10 files to avoid too many signals)
+            if current_completed % 10 == 0:
+                self.size_batch_calculated.emit(current_total)
+                self.progress_updated.emit(
+                    current_completed, len(self.files_to_calculate)
+                )
+
+        return chunk_total
+
     def run(self):
-        """Calculate file sizes in batches and cache them in the file objects"""
+        """Run calculation using work-stealing thread pool"""
         try:
-            total_calculated = 0
+            with QMutexLocker(self.mutex):
+                self.total_calculated = 0
+                self.completed_files = 0
+
             source_client = self.azure_manager.get_blob_service_client(
                 self.source_account
             )
@@ -562,57 +622,39 @@ class SizeCalculatorWorker(QThread):
                 self.calculation_completed.emit(0)
                 return
 
-            # Process files in batches
-            for i in range(0, len(self.files_to_calculate), self.batch_size):
-                if self.cancelled:
-                    break
+            # Divide files among workers
+            chunk_size = max(1, len(self.files_to_calculate) // self.max_workers)
+            file_chunks = [
+                self.files_to_calculate[i : i + chunk_size]
+                for i in range(0, len(self.files_to_calculate), chunk_size)
+            ]
 
-                batch = self.files_to_calculate[i : i + self.batch_size]
-                batch_total = 0
+            # Use ThreadPoolExecutor with work-stealing
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = [
+                    executor.submit(self._worker_function, chunk, source_client, i)
+                    for i, chunk in enumerate(file_chunks)
+                ]
 
-                # Calculate sizes for this batch
-                for file_blob in batch:
+                # Wait for all workers to complete
+                for future in as_completed(futures):
                     if self.cancelled:
                         break
-
-                    if file_blob.get("is_directory", False):
-                        file_blob["size"] = 0
-                        continue
-
                     try:
-                        blob_client = source_client.get_blob_client(
-                            container=self.source_container, blob=file_blob["name"]
-                        )
-                        properties = blob_client.get_blob_properties()
-                        file_size = properties.size
-
-                        # Cache the size in the file blob object
-                        file_blob["size"] = file_size
-                        batch_total += file_size
-
-                        # Small delay between individual requests within batch
-                        time.sleep(0.1)  # 100ms between individual requests
-
+                        chunk_result = future.result()
+                        logging.debug(f"Chunk completed with {chunk_result} bytes")
                     except Exception as e:
-                        logging.warning(
-                            f"Failed to get size for {file_blob['name']}: {e}"
-                        )
-                        file_blob["size"] = 0
-                        continue
+                        logging.error(f"Worker thread error: {e}")
 
-                # Update total and emit progress
-                total_calculated += batch_total
-                self.size_batch_calculated.emit(total_calculated)
+            # Final update
+            with QMutexLocker(self.mutex):
+                final_total = self.total_calculated
 
-                # Delay between batches to avoid throttling
-                if i + self.batch_size < len(
-                    self.files_to_calculate
-                ):  # Don't delay after last batch
-                    time.sleep(self.batch_delay)
+            self.size_batch_calculated.emit(final_total)
+            self.calculation_completed.emit(final_total)
 
-            # Emit final total
-            self.calculation_completed.emit(total_calculated)
+            logging.info(f"Optimized calculation completed. Total: {final_total} bytes")
 
         except Exception as e:
-            logging.error(f"Size calculation error: {e}")
+            logging.error(f"Optimized size calculation error: {e}")
             self.calculation_completed.emit(0)

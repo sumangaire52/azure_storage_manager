@@ -37,7 +37,7 @@ from PyQt6.QtGui import QFont
 
 from log_handler import LogHandler
 from managers import AzureManager
-from utils import populate_signals, format_size, format_bytes
+from utils import populate_signals, format_size
 from workers import AuthWorker, DownloadWorker, TransferWorker
 
 
@@ -1224,17 +1224,15 @@ class TransferProgressDialog(QDialog):
         """Update speed, ETA and transfer statistics"""
         self.speed_label.setText(f"Speed: {speed}")
         self.eta_label.setText(f"ETA: {eta}")
-        self.transferred_label.setText(
-            f"Transferred: {format_bytes(bytes_transferred)}"
-        )
+        self.transferred_label.setText(f"Transferred: {format_size(bytes_transferred)}")
 
         # Show total size based on whether calculation is complete
         if size_calculation_complete:
-            self.total_size_label.setText(f"Total: {format_bytes(total_bytes)}")
+            self.total_size_label.setText(f"Total: {format_size(total_bytes)}")
         else:
             if total_bytes > 0:
                 self.total_size_label.setText(
-                    f"Total: {format_bytes(total_bytes)} (calculating...)"
+                    f"Total: {format_size(total_bytes)} (calculating...)"
                 )
             else:
                 self.total_size_label.setText("Total: Calculating...")
