@@ -45,7 +45,6 @@ class DownloadWorker(QThread):
     def run(self):
         """Main download logic"""
         try:
-            total_files = 0
             completed_files = 0
 
             # First, count total files to download
@@ -58,7 +57,6 @@ class DownloadWorker(QThread):
                     dir_files = self._get_all_files_in_directory(item["name"])
                     files_to_download.extend(dir_files)
                 else:
-                    # Single file
                     files_to_download.append(item)
 
             total_files = len(files_to_download)
@@ -75,7 +73,7 @@ class DownloadWorker(QThread):
                     self.download_completed.emit(False, "Download cancelled")
                     return
 
-                # Skip if this is somehow a directory (shouldn't happen but safety check)
+                # Skip if this is a directory
                 if file_blob.get("is_directory", False):
                     logging.warning(
                         f"Skipping directory in file list: {file_blob['name']}"
@@ -92,7 +90,6 @@ class DownloadWorker(QThread):
                 else:
                     logging.error(f"Failed to download: {file_blob['name']}")
 
-            # Complete
             message = f"Successfully downloaded {completed_files}/{total_files} files"
             self.download_completed.emit(completed_files > 0, message)
 
@@ -173,13 +170,13 @@ class DownloadWorker(QThread):
 class TransferWorker(QThread):
     """Worker thread for transferring blobs between storage accounts"""
 
-    progress_updated = pyqtSignal(int)  # Progress percentage
-    status_updated = pyqtSignal(str)  # Status message
-    file_completed = pyqtSignal(str)  # File path completed
+    progress_updated = pyqtSignal(int)
+    status_updated = pyqtSignal(str)
+    file_completed = pyqtSignal(str)
     transfer_completed = pyqtSignal(bool, str)  # Success, message
     speed_eta_updated = pyqtSignal(
         str, str, int, int, bool
-    )  # Speed, ETA, bytes_transferred, total_bytes, size_calculation_complete
+    )  # Speed, estimated time, bytes_transferred, total_bytes, size_calculation_complete
     size_calculation_started = pyqtSignal(int)  # Total files to calculate
     size_calculation_progress = pyqtSignal(int)  # Running total bytes calculated
 
@@ -302,11 +299,14 @@ class TransferWorker(QThread):
             )
             self.size_calculation_started.emit(self.total_files)
 
+            max_workers = self.options.get("concurrency", 8)
+
             self.size_calculator = SizeCalculatorWorker(
                 self.azure_manager,
                 self.source_account,
                 self.source_container,
                 files_to_transfer,
+                max_workers=max_workers + 2,  # Use 2 more threads for size calculation
             )
 
             self.size_calculator.size_batch_calculated.connect(
@@ -318,7 +318,6 @@ class TransferWorker(QThread):
             self.size_calculator.start()
 
             # Start concurrent transfers
-            max_workers = 10  # Start with 10 concurrent transfers
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # Submit all transfer jobs
@@ -540,7 +539,7 @@ class SizeCalculatorWorker(QThread):
         source_account,
         source_container,
         files_to_calculate,
-        max_workers=12,
+        max_workers,
     ):
         super().__init__()
         self.azure_manager = azure_manager
@@ -629,7 +628,7 @@ class SizeCalculatorWorker(QThread):
                 for i in range(0, len(self.files_to_calculate), chunk_size)
             ]
 
-            # Use ThreadPoolExecutor with work-stealing
+            # Use ThreadPoolExecutor with work stealing
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 futures = [
                     executor.submit(self._worker_function, chunk, source_client, i)
