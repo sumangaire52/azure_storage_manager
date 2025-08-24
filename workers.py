@@ -771,3 +771,116 @@ class UploadWorker(QThread):
             blob_name = target_dir + blob_name
 
         return blob_name
+
+
+class DeleteWorker(QThread):
+    """Worker thread for deleting items from Azure Blob Storage"""
+
+    progress_updated = pyqtSignal(int)
+    status_updated = pyqtSignal(str)
+    item_deleted = pyqtSignal(str)
+    delete_completed = pyqtSignal(bool, str)
+
+    def __init__(self, azure_manager, account_name, container_name, items_to_delete):
+        super().__init__()
+        self.azure_manager = azure_manager
+        self.account_name = account_name
+        self.container_name = container_name
+        self.items_to_delete = items_to_delete
+        self._cancelled = False
+
+    def cancel(self):
+        """Cancel the deletion operation"""
+        self._cancelled = True
+
+    def run(self):
+        """Execute the deletion operation"""
+        try:
+            # Get blob service client
+            client = self.azure_manager.get_blob_service_client(self.account_name)
+            if not client:
+                self.delete_completed.emit(False, "Failed to get Azure client")
+                return
+
+            total_items_to_delete = 0
+            completed_deletions = 0
+            failed_deletions = 0
+
+            # First, collect all items to delete (including directory contents)
+            all_blobs_to_delete = []
+
+            for item in self.items_to_delete:
+                if self._cancelled:
+                    self.delete_completed.emit(False, "Deletion cancelled by user")
+                    return
+
+                if item.get("is_directory", False):
+                    # For directories, get all blobs with this prefix
+                    try:
+                        self.status_updated.emit(f"Scanning directory: {item['name']}")
+                        directory_blobs = self.azure_manager.get_blobs_in_container(
+                            self.account_name, self.container_name, item["name"]
+                        )
+
+                        # Add all non-directory blobs from this directory
+                        for blob in directory_blobs:
+                            if not blob.get("is_directory", False):
+                                all_blobs_to_delete.append(blob["name"])
+
+                    except Exception as e:
+                        logging.error(f"Failed to scan directory {item['name']}: {e}")
+                        failed_deletions += 1
+                        continue
+                else:
+                    # For files, add directly
+                    all_blobs_to_delete.append(item["name"])
+
+            total_items_to_delete = len(all_blobs_to_delete)
+
+            if total_items_to_delete == 0:
+                self.delete_completed.emit(True, "No items to delete")
+                return
+
+            # Now delete all collected blobs
+            for i, blob_name in enumerate(all_blobs_to_delete):
+                if self._cancelled:
+                    self.delete_completed.emit(False, "Deletion cancelled by user")
+                    return
+
+                try:
+                    # Update status
+                    display_name = blob_name.split("/")[-1]  # Show just filename
+                    self.status_updated.emit(f"Deleting: {display_name}")
+
+                    # Get blob client and delete
+                    blob_client = client.get_blob_client(
+                        container=self.container_name, blob=blob_name
+                    )
+
+                    blob_client.delete_blob()
+
+                    completed_deletions += 1
+                    self.item_deleted.emit(blob_name)
+
+                    # Update progress
+                    progress = int(((i + 1) / total_items_to_delete) * 100)
+                    self.progress_updated.emit(progress)
+
+                except Exception as e:
+                    logging.error(f"Failed to delete {blob_name}: {e}")
+                    failed_deletions += 1
+                    continue
+
+            # Complete
+            if failed_deletions == 0:
+                self.delete_completed.emit(
+                    True, f"Successfully deleted {completed_deletions} items"
+                )
+            else:
+                self.delete_completed.emit(
+                    False if completed_deletions == 0 else True,
+                    f"Deleted {completed_deletions} items. {failed_deletions} failed. Check logs for details.",
+                )
+
+        except Exception as e:
+            self.delete_completed.emit(False, f"Deletion failed: {str(e)}")

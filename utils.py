@@ -23,6 +23,11 @@ def populate_signals(window):
     window.upload_completed.connect(window.on_upload_completed)
     window.file_uploaded.connect(window.on_file_uploaded)
 
+    # Files and folder delete
+    window.delete_btn.clicked.connect(window.delete_selected_items)
+    window.delete_completed.connect(window.on_delete_completed)
+    window.item_deleted.connect(window.on_item_deleted)
+
     # Logging
     window.clear_logs_btn.clicked.connect(window.clear_logs)
     window.export_logs_btn.clicked.connect(window.export_logs)

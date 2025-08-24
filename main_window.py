@@ -38,7 +38,13 @@ from PyQt6.QtGui import QFont
 from log_handler import LogHandler
 from managers import AzureManager
 from utils import populate_signals, format_size
-from workers import AuthWorker, DownloadWorker, TransferWorker, UploadWorker
+from workers import (
+    AuthWorker,
+    DownloadWorker,
+    TransferWorker,
+    UploadWorker,
+    DeleteWorker,
+)
 
 
 class MainWindow(QMainWindow):
@@ -49,6 +55,8 @@ class MainWindow(QMainWindow):
     directory_contents_loaded = pyqtSignal(object, list)
     upload_completed = pyqtSignal(bool, str)
     file_uploaded = pyqtSignal(str)
+    delete_completed = pyqtSignal(bool, str)
+    item_deleted = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -62,6 +70,7 @@ class MainWindow(QMainWindow):
         self.refresh_blobs_btn = QPushButton("Refresh")
         self.upload_files_btn = QPushButton("Upload Files")
         self.upload_folder_btn = QPushButton("Upload Folder")
+        self.delete_btn = QPushButton("Delete")
         self.pause_btn = QPushButton("Pause Selected")
         self.resume_btn = QPushButton("Resume Selected")
         self.cancel_btn = QPushButton("Cancel Selected")
@@ -148,7 +157,7 @@ class MainWindow(QMainWindow):
         left_splitter.addWidget(containers_group)
         left_splitter.setSizes([300, 300])
 
-        # Right side - Blob explorer
+        # Blob explorer
         right_group = QGroupBox("Blob Explorer")
         right_layout = QVBoxLayout()
 
@@ -159,8 +168,14 @@ class MainWindow(QMainWindow):
         blob_toolbar.addWidget(QFrame())
         blob_toolbar.addWidget(self.new_transfer_btn)
         blob_toolbar.addWidget(self.download_btn)
+        blob_toolbar.addWidget(self.delete_btn)
         blob_toolbar.addWidget(self.refresh_blobs_btn)
         blob_toolbar.addStretch()
+
+        # Delete button
+        self.delete_btn.setStyleSheet(
+            "QPushButton { background-color: #d32f2f; color: white; }"
+        )
 
         # Blob tree
         self.blobs_tree.setHeaderLabels(["Name", "Size", "Modified", "Tier"])
@@ -1159,6 +1174,138 @@ class MainWindow(QMainWindow):
         # Clean up
         if hasattr(self, "upload_worker"):
             self.upload_worker.deleteLater()
+
+    def delete_selected_items(self):
+        """Delete selected items (files or directories) from blob storage"""
+        selected_items = self.blobs_tree.selectedItems()
+
+        if not selected_items:
+            QMessageBox.warning(self, "Warning", "Please select items to delete.")
+            return
+
+        # Get current account and container
+        if (
+            not self.accounts_list.currentItem()
+            or not self.containers_list.currentItem()
+        ):
+            QMessageBox.warning(
+                self, "Warning", "Please select an account and container."
+            )
+            return
+
+        account_name = self.accounts_list.currentItem().text()
+        container_name = self.containers_list.currentItem().text()
+
+        # Get items to delete
+        items_to_delete = []
+        for item in selected_items:
+            blob_data = item.data(0, Qt.ItemDataRole.UserRole)
+            if blob_data and blob_data.get("name"):
+                items_to_delete.append(blob_data)
+
+        if not items_to_delete:
+            QMessageBox.warning(
+                self, "Warning", "No valid items selected for deletion."
+            )
+            return
+
+        # Count files and directories
+        dirs = sum(1 for item in items_to_delete if item.get("is_directory", False))
+        files = len(items_to_delete) - dirs
+
+        # Show confirmation dialog with warning
+        item_list = "\n".join([f"• {item['name']}" for item in items_to_delete[:10]])
+        if len(items_to_delete) > 10:
+            item_list += f"\n... and {len(items_to_delete) - 10} more items"
+
+        warning_msg = (
+            f"⚠️ WARNING: This will permanently delete:\n\n"
+            f"📁 {dirs} directories\n"
+            f"📄 {files} files\n\n"
+            f"Items to delete:\n{item_list}\n\n"
+            f"This action CANNOT be undone!\n\n"
+            f"Are you sure you want to continue?"
+        )
+
+        # Create custom message box for better visibility
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Confirm Deletion")
+        msg_box.setText("Permanent Deletion Warning")
+        msg_box.setInformativeText(warning_msg)
+        msg_box.setIcon(QMessageBox.Icon.Warning)
+        msg_box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        msg_box.setDefaultButton(QMessageBox.StandardButton.No)
+
+        # Style the Yes button to be more prominent
+        yes_button = msg_box.button(QMessageBox.StandardButton.Yes)
+        yes_button.setText("Delete Permanently")
+        yes_button.setStyleSheet(
+            "background-color: #d32f2f; color: white; font-weight: bold;"
+        )
+
+        result = msg_box.exec()
+
+        if result != QMessageBox.StandardButton.Yes:
+            return
+
+        # Start deletion
+        self._start_deletion(account_name, container_name, items_to_delete)
+
+    def _start_deletion(self, account_name, container_name, items_to_delete):
+        """Start the deletion process with progress dialog"""
+
+        # Create progress dialog
+        self.delete_progress = QProgressDialog(
+            "Preparing deletion...", "Cancel", 0, 100, self
+        )
+        self.delete_progress.setWindowTitle("Deleting Items")
+        self.delete_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.delete_progress.setMinimumDuration(0)
+        self.delete_progress.setValue(0)
+
+        # Create delete worker
+        self.delete_worker = DeleteWorker(
+            self.azure_manager, account_name, container_name, items_to_delete
+        )
+
+        # Connect signals
+        self.delete_worker.progress_updated.connect(self.delete_progress.setValue)
+        self.delete_worker.status_updated.connect(self.delete_progress.setLabelText)
+        self.delete_worker.item_deleted.connect(self.on_item_deleted)
+        self.delete_worker.delete_completed.connect(self.on_delete_completed)
+
+        # Connect cancel button
+        self.delete_progress.canceled.connect(self.delete_worker.cancel)
+
+        # Start deletion
+        self.delete_worker.start()
+
+        logging.info(
+            f"Started deletion of {len(items_to_delete)} items from {account_name}/{container_name}"
+        )
+
+    def on_item_deleted(self, item_name):
+        """Handle individual item deletion completion"""
+        logging.info(f"Deleted: {item_name}")
+
+    def on_delete_completed(self, success, message):
+        """Handle deletion completion"""
+        self.delete_progress.close()
+
+        if success:
+            QMessageBox.information(self, "Deletion Complete", message)
+            logging.info(f"Deletion completed: {message}")
+            # Refresh the current container to update the view
+            self._refresh_current_container()
+        else:
+            QMessageBox.critical(self, "Deletion Failed", message)
+            logging.error(f"Deletion failed: {message}")
+
+        # Clean up
+        if hasattr(self, "delete_worker"):
+            self.delete_worker.deleteLater()
 
     def _refresh_current_container(self):
         """Refresh the current container view after upload"""
