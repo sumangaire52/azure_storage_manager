@@ -755,17 +755,18 @@ class UploadWorker(QThread):
         file_path = Path(file_path)
 
         if self.is_folder and self.base_folder:
-            # For folder upload, preserve directory structure
+            # For folder upload, preserve directory structure INCLUDING the base folder name
             base_path = Path(self.base_folder)
-            relative_path = file_path.relative_to(base_path)
-            blob_name = str(relative_path).replace("\\", "/")  # Ensure forward slashes
+
+            # Get relative path from the parent of base folder
+            relative_path = file_path.relative_to(base_path.parent)
+            blob_name = str(relative_path).replace("\\", "/")
         else:
             # For individual files, just use filename
             blob_name = file_path.name
 
         # Add target directory prefix if specified
         if self.target_directory:
-            # Ensure target directory ends with /
             target_dir = self.target_directory.rstrip("/") + "/"
             blob_name = target_dir + blob_name
 

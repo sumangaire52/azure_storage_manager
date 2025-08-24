@@ -1139,7 +1139,7 @@ class MainWindow(QMainWindow):
             f"Started upload of {len(file_paths)} files to {account_name}/{container_name}/{target_directory}"
         )
 
-    def on_file_uploaded(self, file_path):
+    def on_file_uploaded(self, file_path):  # noqa
         """Handle individual file upload completion"""
         logging.info(f"Uploaded: {file_path}")
 
