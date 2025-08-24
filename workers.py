@@ -657,3 +657,117 @@ class SizeCalculatorWorker(QThread):
         except Exception as e:
             logging.error(f"Optimized size calculation error: {e}")
             self.calculation_completed.emit(0)
+
+
+class UploadWorker(QThread):
+    """Worker thread for uploading files to Azure Blob Storage"""
+
+    progress_updated = pyqtSignal(int)
+    status_updated = pyqtSignal(str)
+    file_uploaded = pyqtSignal(str)
+    upload_completed = pyqtSignal(bool, str)
+
+    def __init__(
+        self,
+        azure_manager,
+        account_name,
+        container_name,
+        file_paths,
+        target_directory,
+        is_folder=False,
+        base_folder=None,
+    ):
+        super().__init__()
+        self.azure_manager = azure_manager
+        self.account_name = account_name
+        self.container_name = container_name
+        self.file_paths = file_paths
+        self.target_directory = target_directory
+        self.is_folder = is_folder
+        self.base_folder = base_folder
+        self._cancelled = False
+
+    def cancel(self):
+        """Cancel the upload operation"""
+        self._cancelled = True
+
+    def run(self):
+        """Execute the upload operation"""
+        try:
+            # Get blob service client
+            client = self.azure_manager.get_blob_service_client(self.account_name)
+            if not client:
+                self.upload_completed.emit(False, "Failed to get Azure client")
+                return
+
+            total_files = len(self.file_paths)
+            completed_files = 0
+
+            for i, file_path in enumerate(self.file_paths):
+                if self._cancelled:
+                    self.upload_completed.emit(False, "Upload cancelled by user")
+                    return
+
+                try:
+                    # Calculate blob name based on upload type
+                    blob_name = self._calculate_blob_name(file_path)
+
+                    # Update status
+                    self.status_updated.emit(f"Uploading {Path(file_path).name}...")
+
+                    # Get blob client
+                    blob_client = client.get_blob_client(
+                        container=self.container_name, blob=blob_name
+                    )
+
+                    # Upload file
+                    with open(file_path, "rb") as data:
+                        blob_client.upload_blob(data, overwrite=True)
+
+                    completed_files += 1
+                    self.file_uploaded.emit(file_path)
+
+                    # Update progress
+                    progress = int((completed_files / total_files) * 100)
+                    self.progress_updated.emit(progress)
+
+                except Exception as e:
+                    logging.error(f"Failed to upload {file_path}: {e}")
+                    # Continue with other files
+                    continue
+
+            # Complete
+            if completed_files == total_files:
+                self.upload_completed.emit(
+                    True, f"Successfully uploaded {completed_files} files"
+                )
+            else:
+                self.upload_completed.emit(
+                    False,
+                    f"Uploaded {completed_files} of {total_files} files. Check logs for errors.",
+                )
+
+        except Exception as e:
+            self.upload_completed.emit(False, f"Upload failed: {str(e)}")
+
+    def _calculate_blob_name(self, file_path):
+        """Calculate the blob name based on upload type and target directory"""
+        file_path = Path(file_path)
+
+        if self.is_folder and self.base_folder:
+            # For folder upload, preserve directory structure INCLUDING the base folder name
+            base_path = Path(self.base_folder)
+
+            # Get relative path from the parent of base folder
+            relative_path = file_path.relative_to(base_path.parent)
+            blob_name = str(relative_path).replace("\\", "/")
+        else:
+            # For individual files, just use filename
+            blob_name = file_path.name
+
+        # Add target directory prefix if specified
+        if self.target_directory:
+            target_dir = self.target_directory.rstrip("/") + "/"
+            blob_name = target_dir + blob_name
+
+        return blob_name

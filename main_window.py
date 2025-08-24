@@ -38,7 +38,7 @@ from PyQt6.QtGui import QFont
 from log_handler import LogHandler
 from managers import AzureManager
 from utils import populate_signals, format_size
-from workers import AuthWorker, DownloadWorker, TransferWorker
+from workers import AuthWorker, DownloadWorker, TransferWorker, UploadWorker
 
 
 class MainWindow(QMainWindow):
@@ -47,6 +47,8 @@ class MainWindow(QMainWindow):
     containers_loaded = pyqtSignal(list)
     blobs_loaded = pyqtSignal(list)
     directory_contents_loaded = pyqtSignal(object, list)
+    upload_completed = pyqtSignal(bool, str)
+    file_uploaded = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -58,6 +60,8 @@ class MainWindow(QMainWindow):
         self.new_transfer_btn = QPushButton("New Transfer Job")
         self.download_btn = QPushButton("Download Selected")
         self.refresh_blobs_btn = QPushButton("Refresh")
+        self.upload_files_btn = QPushButton("Upload Files")
+        self.upload_folder_btn = QPushButton("Upload Folder")
         self.pause_btn = QPushButton("Pause Selected")
         self.resume_btn = QPushButton("Resume Selected")
         self.cancel_btn = QPushButton("Cancel Selected")
@@ -131,14 +135,12 @@ class MainWindow(QMainWindow):
         # Storage accounts
         accounts_group = QGroupBox("Storage Accounts")
         accounts_layout = QVBoxLayout()
-
         accounts_layout.addWidget(self.accounts_list)
         accounts_group.setLayout(accounts_layout)
 
         # Containers
         containers_group = QGroupBox("Containers")
         containers_layout = QVBoxLayout()
-
         containers_layout.addWidget(self.containers_list)
         containers_group.setLayout(containers_layout)
 
@@ -152,7 +154,9 @@ class MainWindow(QMainWindow):
 
         # Toolbar for blob operations
         blob_toolbar = QHBoxLayout()
-
+        blob_toolbar.addWidget(self.upload_files_btn)
+        blob_toolbar.addWidget(self.upload_folder_btn)
+        blob_toolbar.addWidget(QFrame())
         blob_toolbar.addWidget(self.new_transfer_btn)
         blob_toolbar.addWidget(self.download_btn)
         blob_toolbar.addWidget(self.refresh_blobs_btn)
@@ -996,28 +1000,171 @@ class MainWindow(QMainWindow):
         else:
             logging.error(f"Transfer failed: {message}")
 
-    def get_selected_items_info(self):
-        """Get information about selected items for download preview"""
+    def upload_files(self):
+        """Upload multiple files to the current directory"""
+        if not self._validate_upload_context():
+            return
+
+        # Open file dialog to select multiple files
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Select Files to Upload", str(Path.home()), "All Files (*)"
+        )
+
+        if not files:
+            return  # User cancelled
+
+        self._start_upload(files, is_folder=False)
+
+    def upload_folder(self):
+        """Upload a folder and its contents to the current directory"""
+        if not self._validate_upload_context():
+            return
+
+        # Open directory dialog
+        folder_path = QFileDialog.getExistingDirectory(
+            self, "Select Folder to Upload", str(Path.home())
+        )
+
+        if not folder_path:
+            return  # User cancelled
+
+        # Get all files in the folder recursively
+        folder_path = Path(folder_path)
+        files = []
+        for file_path in folder_path.rglob("*"):
+            if file_path.is_file():
+                files.append(str(file_path))
+
+        if not files:
+            QMessageBox.warning(
+                self, "Warning", "No files found in the selected folder."
+            )
+            return
+
+        self._start_upload(files, is_folder=True, base_folder=str(folder_path))
+
+    def _validate_upload_context(self):
+        """Validate that we have the necessary context for upload"""
+        if (
+            not self.accounts_list.currentItem()
+            or not self.containers_list.currentItem()
+        ):
+            QMessageBox.warning(
+                self, "Warning", "Please select an account and container first."
+            )
+            return False
+
+        # Check if "No containers found" or "Loading..." is selected
+        container_text = self.containers_list.currentItem().text()
+        if container_text in ["No containers found", "Loading..."]:
+            QMessageBox.warning(self, "Warning", "Please select a valid container.")
+            return False
+
+        return True
+
+    def _get_current_directory_path(self):
+        """Get the current directory path based on selected tree item"""
+        # Check if a directory is currently selected in the tree
         selected_items = self.blobs_tree.selectedItems()
 
-        if not selected_items:
-            return {"files": 0, "directories": 0, "total_size": 0}
+        if selected_items:
+            # Get the first selected item
+            selected_item = selected_items[0]
+            blob_data = selected_item.data(0, Qt.ItemDataRole.UserRole)
 
-        info = {"files": 0, "directories": 0, "total_size": 0}
+            if blob_data and blob_data.get("is_directory", False):
+                # User selected a directory, upload to that directory
+                return blob_data["name"]
 
-        for item in selected_items:
-            blob_data = item.data(0, Qt.ItemDataRole.UserRole)
-            if not blob_data:
-                continue
+        # No directory selected or file selected, upload to root
+        return ""
 
-            if blob_data.get("is_directory", False):
-                info["directories"] += 1
-                # Note: Would need to calculate directory size by listing all files
-            else:
-                info["files"] += 1
-                info["total_size"] += blob_data.get("size", 0)
+    def _start_upload(self, file_paths, is_folder=False, base_folder=None):
+        """Start the upload process with progress dialog"""
+        account_name = self.accounts_list.currentItem().text()
+        container_name = self.containers_list.currentItem().text()
+        target_directory = self._get_current_directory_path()
 
-        return info
+        # Show confirmation dialog
+        upload_type = "folder" if is_folder else "files"
+        target_text = (
+            f" to directory '{target_directory}'"
+            if target_directory
+            else " to root directory"
+        )
+
+        result = QMessageBox.question(
+            self,
+            "Confirm Upload",
+            f"Upload {len(file_paths)} {upload_type}{target_text} in container '{container_name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+
+        if result != QMessageBox.StandardButton.Yes:
+            return
+
+        # Create progress dialog
+        self.upload_progress = QProgressDialog(
+            "Preparing upload...", "Cancel", 0, 100, self
+        )
+        self.upload_progress.setWindowTitle("Uploading Files")
+        self.upload_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.upload_progress.setMinimumDuration(0)
+        self.upload_progress.setValue(0)
+
+        # Create upload worker
+        self.upload_worker = UploadWorker(
+            self.azure_manager,
+            account_name,
+            container_name,
+            file_paths,
+            target_directory,
+            is_folder,
+            base_folder,
+        )
+
+        # Connect signals
+        self.upload_worker.progress_updated.connect(self.upload_progress.setValue)
+        self.upload_worker.status_updated.connect(self.upload_progress.setLabelText)
+        self.upload_worker.file_uploaded.connect(self.on_file_uploaded)
+        self.upload_worker.upload_completed.connect(self.on_upload_completed)
+
+        # Connect cancel button
+        self.upload_progress.canceled.connect(self.upload_worker.cancel)
+
+        # Start upload
+        self.upload_worker.start()
+
+        logging.info(
+            f"Started upload of {len(file_paths)} files to {account_name}/{container_name}/{target_directory}"
+        )
+
+    def on_file_uploaded(self, file_path):  # noqa
+        """Handle individual file upload completion"""
+        logging.info(f"Uploaded: {file_path}")
+
+    def on_upload_completed(self, success, message):
+        """Handle upload completion"""
+        self.upload_progress.close()
+
+        if success:
+            QMessageBox.information(self, "Upload Complete", message)
+            logging.info(f"Upload completed: {message}")
+            # Refresh the current container to show uploaded files
+            self._refresh_current_container()
+        else:
+            QMessageBox.critical(self, "Upload Failed", message)
+            logging.error(f"Upload failed: {message}")
+
+        # Clean up
+        if hasattr(self, "upload_worker"):
+            self.upload_worker.deleteLater()
+
+    def _refresh_current_container(self):
+        """Refresh the current container view after upload"""
+        if self.containers_list.currentItem():
+            # Re-trigger container selection to refresh the view
+            self.on_container_selected(self.containers_list.currentItem())
 
 
 class TransferDialog(QDialog):

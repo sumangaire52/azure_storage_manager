@@ -17,6 +17,12 @@ def populate_signals(window):
     # Files and folder download/transfer
     window.download_btn.clicked.connect(window.download_selected_items)
 
+    # Files and folder upload
+    window.upload_files_btn.clicked.connect(window.upload_files)
+    window.upload_folder_btn.clicked.connect(window.upload_folder)
+    window.upload_completed.connect(window.on_upload_completed)
+    window.file_uploaded.connect(window.on_file_uploaded)
+
     # Logging
     window.clear_logs_btn.clicked.connect(window.clear_logs)
     window.export_logs_btn.clicked.connect(window.export_logs)
